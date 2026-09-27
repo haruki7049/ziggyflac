@@ -23,6 +23,8 @@ ______________________________________________________________________
   - `modules/ziggyflac/ziggyflac.zig`: Entry point of the high-level `ziggyflac` module.
   - `build.zig` & `build.zig.zon`: Build definition and package metadata. Steps: `zig build` (static libraries `ziggyflac` and `flacontainer`), `zig build test`.
   - `flake.nix`, `shell.nix`, `default.nix`: Nix development shell and package configurations.
+  - `.github/workflows/`: CI workflows (`ci.yml`, `nix-checker.yml`, `pr-conventional-commits-validation.yml`).
+  - `.agents/skills/`: Workspace skills for AI agents (see section 7).
 
 ______________________________________________________________________
 
