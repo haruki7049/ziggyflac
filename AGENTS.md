@@ -106,6 +106,7 @@ ______________________________________________________________________
 - **Labels**: When creating Issues or Pull Requests with `gh`, assign relevant existing labels (e.g. `feat`, `fix`, `docs`) if the repository has them. Do not create new labels without user approval.
 - **Label Policy**: Labels reflect the repository's **current state**: commit types accepted by `.github/workflows/pr-conventional-commits-validation.yml`, files that exist (e.g. `AGENTS.md`, `build.zig.zon`, `ci.yml`), modules under `modules/` (`flacontainer`, `ziggyflac`), and `.agents/skills` (`skills`). Do not add a label only because a sibling repository (e.g. `lightmix`) has it. Delete labels whose target no longer exists, and add labels when a new file, module, or workflow is introduced. Whether assigning labels is mandatory is still undecided.
 - **Versioning**: Use Semantic Versioning **without** a `v` prefix (e.g. `0.1.0`). `version` in `build.zig.zon` is the single source of truth. Never create a tag or a release by hand, and only prepare a version bump when the user asks for it.
+- **No Session Links**: Do not include AI session URLs or other internal session identifiers (e.g. a `Claude-Session:` trailer) in commit messages or PR descriptions; this repository is public and such links are not meant to be public information. A `Co-Authored-By:` trailer is fine.
 
 ______________________________________________________________________
 
