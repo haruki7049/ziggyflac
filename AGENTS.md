@@ -98,7 +98,7 @@ ______________________________________________________________________
 
 ## 6. Git & Pull Request Conventions
 
-- **Conventional Commits**: Use conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `docs:`, `build:`, `test:`, `perf:`), optionally with a scope (e.g. `feat(flacontainer):`, `build(flake.lock):`). Pull request titles follow the same format.
+- **Conventional Commits**: Use conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `docs:`, `build:`, `test:`, `perf:`, `ci:`, `chore:`, `style:`, `revert:`; keep in sync with `.github/workflows/pr-conventional-commits-validation.yml`), optionally with a scope (e.g. `feat(flacontainer):`, `build(flake.lock):`). Pull request titles follow the same format.
 - **PR Creation**: Create PRs using `gh pr create`. Reference issues in the body using standard keywords (e.g. `Closes #1`).
 - **PR Merge Prohibition**: **NEVER MERGE Pull Requests.** PRs must remain open for maintainer review unless the user explicitly commands the agent to merge a specific PR.
 - **Labels**: When creating Issues or Pull Requests with `gh`, assign relevant existing labels (e.g. `feat`, `fix`, `docs`) if the repository has them. Do not create new labels without user approval.
