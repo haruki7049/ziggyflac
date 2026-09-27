@@ -501,20 +501,22 @@ pub const FrameHeader = struct {
             .coded_number = coded_number,
         };
     }
-};
 
-fn decodeSampleSize(bits: u3) error{ReservedSampleSize}!?u6 {
-    return switch (bits) {
-        0 => null,
-        1 => 8,
-        2 => 12,
-        3 => error.ReservedSampleSize,
-        4 => 16,
-        5 => 20,
-        6 => 24,
-        7 => 32,
-    };
-}
+    /// Decodes the header's 3-bit sample-size code into bits per sample, or
+    /// `null` if it must be taken from STREAMINFO (RFC 9639 Section 9.1.3).
+    fn decodeSampleSize(bits: u3) error{ReservedSampleSize}!?u6 {
+        return switch (bits) {
+            0 => null,
+            1 => 8,
+            2 => 12,
+            3 => error.ReservedSampleSize,
+            4 => 16,
+            5 => 20,
+            6 => 24,
+            7 => 32,
+        };
+    }
+};
 
 /// Reads the UTF-8-like variable-length coded number that follows a frame
 /// header's fixed fields (RFC 9639 Section 9.1.5): 7 bits in 1 byte up to
