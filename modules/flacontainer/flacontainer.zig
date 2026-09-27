@@ -19,13 +19,14 @@ pub fn readMarker(reader: *std.Io.Reader) ReadMarkerError!void {
     if (!std.mem.eql(u8, bytes, constants.marker)) return error.InvalidMarker;
 }
 
-/// A minimally parsed FLAC stream: the mandatory STREAMINFO metadata block
-/// and the header of the first audio frame. Every other metadata block is
-/// parsed (to validate it and advance the reader correctly) and then
-/// discarded, since nothing in this container layer needs to keep it yet.
+/// A fully parsed FLAC stream: the mandatory STREAMINFO metadata block and
+/// every audio frame. Metadata blocks other than STREAMINFO are parsed (to
+/// validate them and advance the reader correctly) and then discarded, since
+/// nothing in this container layer needs to keep them yet.
 pub const Stream = struct {
     stream_info: metadata.StreamInfo,
-    first_frame_header: audio.FrameHeader,
+    /// Every frame in the stream, owned by this `Stream` and freed by `deinit`.
+    frames: []audio.Frame,
 
     /// Errors returned by `read`.
     pub const ReadError = ReadMarkerError ||
@@ -36,15 +37,16 @@ pub const Stream = struct {
         metadata.VorbisComment.ReadError ||
         metadata.CueSheet.ReadError ||
         metadata.Picture.ReadError ||
-        audio.FrameHeader.ReadError ||
+        audio.Frame.ReadError ||
         error{
             /// The first metadata block was not STREAMINFO (RFC 9639 Section 7 requires it).
             MissingStreamInfo,
         };
 
-    /// Reads the marker, every metadata block, and the first frame header
-    /// from `reader`. `allocator` is used only transiently, to parse and
-    /// then immediately discard metadata blocks other than STREAMINFO.
+    /// Reads the marker, every metadata block, and every audio frame from
+    /// `reader`. `allocator` is used to parse and then immediately discard
+    /// metadata blocks other than STREAMINFO, and to allocate the returned
+    /// `frames`, which the caller frees with `deinit`.
     pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!Stream {
         try readMarker(reader);
 
@@ -81,13 +83,34 @@ pub const Stream = struct {
 
             if (stream_info == null and is_last) return error.MissingStreamInfo;
         }
+        const resolved_stream_info = stream_info orelse return error.MissingStreamInfo;
 
-        const first_frame_header = try audio.FrameHeader.read(reader);
+        var frames: std.ArrayList(audio.Frame) = .empty;
+        errdefer {
+            for (frames.items) |frame| frame.deinit(allocator);
+            frames.deinit(allocator);
+        }
+        while (true) {
+            // A clean end of stream is only valid right at a frame boundary;
+            // any error.EndOfStream from within Frame.read itself (a
+            // truncated frame) still propagates as a real error below.
+            _ = reader.peekByte() catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => |e| return e,
+            };
+            const frame = try audio.Frame.read(reader, allocator, resolved_stream_info.bits_per_sample);
+            try frames.append(allocator, frame);
+        }
 
         return .{
-            .stream_info = stream_info orelse return error.MissingStreamInfo,
-            .first_frame_header = first_frame_header,
+            .stream_info = resolved_stream_info,
+            .frames = try frames.toOwnedSlice(allocator),
         };
+    }
+
+    pub fn deinit(self: Stream, allocator: std.mem.Allocator) void {
+        for (self.frames) |frame| frame.deinit(allocator);
+        allocator.free(self.frames);
     }
 };
 
@@ -139,20 +162,52 @@ test "Stream.read parses a small sample FLAC stream end-to-end" {
     // channels, 16 bits per sample, frame number 0.
     const frame_header_body = [_]u8{ 0xff, 0xf8, 0x49, 0x18, 0x00 };
     const frame_header_crc = audio.HeaderCrc.hash(&frame_header_body);
+    // Two CONSTANT subframes (one per channel), value 0: header byte (pad=0,
+    // type=constant, no wasted bits) + a 16-bit zero sample, each.
+    const subframe_bytes = [_]u8{ 0x00, 0x00, 0x00 } ++ [_]u8{ 0x00, 0x00, 0x00 };
+    const frame_body = frame_header_body ++ [_]u8{frame_header_crc} ++ subframe_bytes;
+    const frame_footer_crc = audio.FooterCrc.hash(&frame_body);
 
     const marker_bytes = [_]u8{ 'f', 'L', 'a', 'C' };
     var reader: std.Io.Reader = .fixed(&(marker_bytes ++
         stream_info_header ++ stream_info_body ++
         padding_header ++ padding_body ++
-        frame_header_body ++ [_]u8{frame_header_crc}));
+        frame_body ++ [_]u8{
+        @intCast(frame_footer_crc >> 8),
+        @intCast(frame_footer_crc & 0xff),
+    }));
 
     const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 44_100), stream.stream_info.sample_rate);
     try std.testing.expectEqual(@as(u4, 2), stream.stream_info.channels);
     try std.testing.expectEqual(@as(u6, 16), stream.stream_info.bits_per_sample);
-    try std.testing.expectEqual(@as(u16, 2304), stream.first_frame_header.block_size);
-    try std.testing.expectEqual(@as(?u32, 44_100), stream.first_frame_header.sample_rate);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+    try std.testing.expectEqual(@as(u16, 2304), stream.frames[0].header.block_size);
+    try std.testing.expectEqual(@as(?u32, 44_100), stream.frames[0].header.sample_rate);
+    try std.testing.expectEqual(@as(usize, 2), stream.frames[0].subframes.len);
+    try std.testing.expectEqual(@as(i64, 0), stream.frames[0].subframes[0].body.constant);
+}
+
+test "Stream.read parses a real encoder-generated FLAC file" {
+    // A 100-sample, 8 kHz, mono, 16-bit sine wave encoded by `flac` 1.5.0
+    // (reference libFLAC), with the seek table and padding stripped to keep
+    // the fixture minimal. Exercises real STREAMINFO, VORBIS_COMMENT, a
+    // FIXED or LPC subframe, and both CRCs, none of which are hand-crafted.
+    const bytes = @embedFile("testdata/tiny.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 8_000), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(u4, 1), stream.stream_info.channels);
+    try std.testing.expectEqual(@as(u6, 16), stream.stream_info.bits_per_sample);
+    try std.testing.expectEqual(@as(u36, 100), stream.stream_info.total_samples);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+    try std.testing.expectEqual(@as(u16, 100), stream.frames[0].header.block_size);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames[0].subframes.len);
 }
 
 test "Stream.read rejects a stream whose first block is not STREAMINFO" {
