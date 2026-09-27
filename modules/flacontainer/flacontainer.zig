@@ -210,6 +210,64 @@ test "Stream.read parses a real encoder-generated FLAC file" {
     try std.testing.expectEqual(@as(usize, 1), stream.frames[0].subframes.len);
 }
 
+test "Stream.read parses a real stereo FLAC file with channel decorrelation" {
+    // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones so the
+    // encoder is free to pick any stereo decorrelation mode per frame.
+    const bytes = @embedFile("testdata/stereo.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u4, 2), stream.stream_info.channels);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+    try std.testing.expectEqual(@as(u4, 2), stream.frames[0].header.channel_assignment.channelCount());
+    try std.testing.expectEqual(@as(usize, 2), stream.frames[0].subframes.len);
+}
+
+test "Stream.read walks multiple frames" {
+    // The same 100-sample sine wave as the mono fixture, but encoded with a
+    // blocksize of 32 samples so it spans several frames instead of one.
+    const bytes = @embedFile("testdata/multiframe.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expect(stream.frames.len > 1);
+
+    var total_samples: usize = 0;
+    for (stream.frames) |frame| total_samples += frame.header.block_size;
+    try std.testing.expectEqual(@as(usize, @intCast(stream.stream_info.total_samples)), total_samples);
+}
+
+test "Stream.read parses real CONSTANT subframes from silence" {
+    // 50 samples of digital silence: the encoder should use a CONSTANT
+    // subframe, previously only exercised with hand-crafted bytes.
+    const bytes = @embedFile("testdata/silence.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+    try std.testing.expectEqual(audio.SubframeType.constant, stream.frames[0].subframes[0].header.subframe_type);
+    try std.testing.expectEqual(@as(i64, 0), stream.frames[0].subframes[0].body.constant);
+}
+
+test "Stream.read parses a real SEEKTABLE metadata block" {
+    // Same as the mono fixture, but encoded with the default seek table
+    // (one seek point) instead of stripping it.
+    const bytes = @embedFile("testdata/seektable.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 8_000), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+}
+
 test "Stream.read rejects a stream whose first block is not STREAMINFO" {
     // Metadata block header: last, PADDING, length 0.
     const padding_header = [_]u8{ 0x81, 0x00, 0x00, 0x00 };
