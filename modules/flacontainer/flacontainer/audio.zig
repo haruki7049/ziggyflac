@@ -414,13 +414,22 @@ pub const FrameHeader = struct {
         return header;
     }
 
+    /// The frame sync code (RFC 9639 Section 9.1.1) spans the header's first
+    /// byte and the top 6 bits of the second.
+    const sync_byte_value: u8 = 0xff;
+    const sync_bits_mask: u8 = 0xfc;
+    const sync_bits_value: u8 = 0xf8;
+    /// Reserved bit (must be 0) in the second header byte, just before the
+    /// blocking-strategy bit.
+    const reserved_flag_mask: u8 = 0b10;
+
     fn parseFields(source: *RecordingByteSource) ReadError!FrameHeader {
         const sync_byte = try source.takeByte();
-        if (sync_byte != 0xff) return error.InvalidSyncCode;
+        if (sync_byte != sync_byte_value) return error.InvalidSyncCode;
 
         const flags_byte = try source.takeByte();
-        if (flags_byte & 0xfc != 0xf8) return error.InvalidSyncCode;
-        if (flags_byte & 0b10 != 0) return error.ReservedBit;
+        if (flags_byte & sync_bits_mask != sync_bits_value) return error.InvalidSyncCode;
+        if (flags_byte & reserved_flag_mask != 0) return error.ReservedBit;
         const blocking_strategy: BlockingStrategy = @enumFromInt(@as(u1, @intCast(flags_byte & 0b1)));
 
         const size_rate_byte = try source.takeByte();
