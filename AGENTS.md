@@ -101,6 +101,7 @@ ______________________________________________________________________
 - **PR Creation**: Create PRs using `gh pr create`. Reference issues in the body using standard keywords (e.g. `Closes #1`).
 - **PR Merge Prohibition**: **NEVER MERGE Pull Requests.** PRs must remain open for maintainer review unless the user explicitly commands the agent to merge a specific PR.
 - **Labels**: When creating Issues or Pull Requests with `gh`, assign relevant existing labels (e.g. `feat`, `fix`, `docs`) if the repository has them. Do not create new labels without user approval.
+- **Label Policy**: Labels reflect the repository's **current state**: commit types accepted by `.github/workflows/pr-conventional-commits-validation.yml`, files that exist (e.g. `AGENTS.md`, `build.zig.zon`, `ci.yml`), modules under `modules/` (`flacontainer`, `ziggyflac`), and `.agents/skills` (`skills`). Do not add a label only because a sibling repository (e.g. `lightmix`) has it. Delete labels whose target no longer exists, and add labels when a new file, module, or workflow is introduced. Whether assigning labels is mandatory is still undecided.
 - **Versioning**: Use Semantic Versioning **without** a `v` prefix (e.g. `0.1.0`). `version` in `build.zig.zon` is the single source of truth. Never create a tag or a release by hand, and only prepare a version bump when the user asks for it.
 
 ______________________________________________________________________
