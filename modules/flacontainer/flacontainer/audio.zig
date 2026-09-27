@@ -205,27 +205,19 @@ pub const Residual = struct {
                 block_size >> shift;
 
             const parameter = try bits.readBits(parameter_bits);
-            if (parameter == escape_parameter) {
-                const raw_bits: u7 = @intCast(try bits.readBits(5));
-                var i: usize = 0;
-                while (i < partition_samples) : (i += 1) {
-                    values[filled] = @intCast(try bits.readSignedBits(raw_bits));
-                    filled += 1;
-                }
-            } else {
-                const k: u7 = @intCast(parameter);
-                var i: usize = 0;
-                while (i < partition_samples) : (i += 1) {
-                    const quotient = try bits.readUnary();
-                    const remainder = try bits.readBits(k);
-                    const folded = (@as(u64, quotient) << @intCast(k)) | remainder;
-                    const value: i32 = if (folded & 1 == 0)
-                        @intCast(folded >> 1)
-                    else
-                        @intCast(-@as(i64, @intCast((folded + 1) >> 1)));
-                    values[filled] = value;
-                    filled += 1;
-                }
+            const escape_raw_bits: ?u7 = if (parameter == escape_parameter)
+                @intCast(try bits.readBits(5))
+            else
+                null;
+            const k: u7 = @intCast(parameter);
+
+            var i: usize = 0;
+            while (i < partition_samples) : (i += 1) {
+                values[filled] = if (escape_raw_bits) |raw_bits|
+                    try readEscapedValue(bits, raw_bits)
+                else
+                    try readRiceValue(bits, k);
+                filled += 1;
             }
         }
 
@@ -236,6 +228,25 @@ pub const Residual = struct {
         allocator.free(self.values);
     }
 };
+
+/// Reads one residual value stored as a raw `raw_bits`-wide signed integer
+/// (the escape code for a partition whose Rice parameter equals the maximum
+/// representable value, RFC 9639 Section 9.2.7).
+fn readEscapedValue(bits: *BitReader, raw_bits: u7) BitReader.Error!i32 {
+    return @intCast(try bits.readSignedBits(raw_bits));
+}
+
+/// Reads one Rice-coded residual value with parameter `k`: a unary quotient
+/// followed by a `k`-bit remainder, folded into a signed integer.
+fn readRiceValue(bits: *BitReader, k: u7) BitReader.Error!i32 {
+    const quotient = try bits.readUnary();
+    const remainder = try bits.readBits(k);
+    const folded = (@as(u64, quotient) << @intCast(k)) | remainder;
+    return if (folded & 1 == 0)
+        @intCast(folded >> 1)
+    else
+        @intCast(-@as(i64, @intCast((folded + 1) >> 1)));
+}
 
 /// A subframe body (RFC 9639 Section 9.2), decoded structurally: warmup
 /// samples, LPC coefficients, and residual values are recovered as raw
