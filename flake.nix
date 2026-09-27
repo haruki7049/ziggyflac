@@ -46,9 +46,6 @@
 
             # Music Player
             pkgs.sox # Use this command as: `play result.wav`
-
-            # zon2nix
-            pkgs.zon2nix
           ];
 
           ziggyflac = pkgs.stdenv.mkDerivation {
@@ -59,8 +56,6 @@
             inherit nativeBuildInputs buildInputs;
 
             postConfigure = ''
-              ln -s ${pkgs.callPackage ./.deps.nix { }} zig-pkg
-
               # Remove NIX_CFLAGS_COMPILE because zig cannot understand it
               unset NIX_CFLAGS_COMPILE
             '';
