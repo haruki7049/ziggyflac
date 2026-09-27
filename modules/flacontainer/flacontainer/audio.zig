@@ -237,7 +237,8 @@ fn readEscapedValue(bits: *BitReader, raw_bits: u7) BitReader.Error!i32 {
 }
 
 /// Reads one Rice-coded residual value with parameter `k`: a unary quotient
-/// followed by a `k`-bit remainder, folded into a signed integer.
+/// followed by a `k`-bit remainder, folded into a signed integer
+/// (RFC 9639 Section 9.2.7).
 fn readRiceValue(bits: *BitReader, k: u7) BitReader.Error!i32 {
     const quotient = try bits.readUnary();
     const remainder = try bits.readBits(k);
