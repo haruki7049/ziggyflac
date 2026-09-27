@@ -34,7 +34,7 @@ ______________________________________________________________________
 - **Dedicated Branches**: Always work on a dedicated branch (e.g. `feat/stream-info`, `fix/block-size`). Do not commit directly to `main`.
 - **Verification Before Submitting**: All changes must pass `treefmt --fail-on-change`, `zig build`, and `zig build test`.
 - **Evidence First**: Base all answers and actions on actual file contents and command output. Never speculate or assume.
-- **Non-Destructive**: Never perform irreversible actions (file deletions, hard resets, remote push, force push) without explicit user approval.
+- **Non-Destructive**: Never perform irreversible actions (file deletions, hard resets, force push, pushing to `main`) without explicit user approval. Pushing topic branches is allowed as described above.
 - **Targeted Edits**: Make minimal, logical changes strictly necessary for the request. Do not modify unrelated files.
 - **No Unsolicited Actions on Other Branches/PRs**: Never modify, rebase, or resolve conflicts on PRs or branches without explicit user instructions.
 - **English-Only Documentation**: All repository documentation, code comments, commit messages, and PR descriptions must be written strictly in English.
