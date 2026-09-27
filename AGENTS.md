@@ -102,3 +102,19 @@ ______________________________________________________________________
 - **PR Merge Prohibition**: **NEVER MERGE Pull Requests.** PRs must remain open for maintainer review unless the user explicitly commands the agent to merge a specific PR.
 - **Labels**: When creating Issues or Pull Requests with `gh`, assign relevant existing labels (e.g. `feat`, `fix`, `docs`) if the repository has them. Do not create new labels without user approval.
 - **Versioning**: Use Semantic Versioning **without** a `v` prefix (e.g. `0.1.0`). `version` in `build.zig.zon` is the single source of truth. Never create a tag or a release by hand, and only prepare a version bump when the user asks for it.
+
+______________________________________________________________________
+
+## 7. Workspace Skills
+
+Detailed runbooks and procedural workflows are maintained as workspace skills under `.agents/skills/`:
+
+| Trigger / Context | Skill to Read | Purpose |
+| :--- | :--- | :--- |
+| Deep investigation, complex code search | [`investigate`](.agents/skills/investigate/SKILL.md) | Non-destructive investigation guidelines |
+| Commit conventions & policies | [`git-commit`](.agents/skills/git-commit/SKILL.md) | Commit conventions and prohibition of unprompted commit/push proposals |
+| Deleting files, overwriting, git push/reset | [`irreversible`](.agents/skills/irreversible/SKILL.md) | Pre-checks and confirmation prompts |
+| Testing, verifying builds or behavior | [`verify`](.agents/skills/verify/SKILL.md) | Minimal, high-signal verification steps |
+| Bumping `flake.lock`, Zig version, or adding FLAC test fixtures | [`update-dependencies`](.agents/skills/update-dependencies/SKILL.md) | Procedures for Nix input updates, Zig version bumps, and test fixtures |
+| Preparing PRs, formatting, pre-submission checks | [`pr-workflow`](.agents/skills/pr-workflow/SKILL.md) | Verification command table, commit rules, and PR requirements |
+| "Fresh eyes" sweep for issues not already tracked, sanity-checking a batch of fixes | [`fresh-eyes-audit`](.agents/skills/fresh-eyes-audit/SKILL.md) | Parallel, context-free repo audits to surface gaps a single continuously-informed reviewer would miss |
