@@ -31,8 +31,7 @@ pub const Header = struct {
         const first_byte = try reader.takeByte();
         const is_last = (first_byte & 0x80) != 0;
         const type_bits: u7 = @intCast(first_byte & 0x7f);
-        if (type_bits >= @typeInfo(BlockHeader).@"enum".fields.len) return error.InvalidBlockType;
-        const block_type: BlockHeader = @enumFromInt(type_bits);
+        const block_type = std.enums.fromInt(BlockHeader, type_bits) orelse return error.InvalidBlockType;
         const length = try reader.takeVarInt(u24, .big, 3);
 
         return .{
