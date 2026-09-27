@@ -8,6 +8,18 @@ pub const HeaderCrc = std.hash.crc.Crc8Smbus;
 /// polynomial 0x8005, no reflection, initial value 0, no output XOR.
 pub const FooterCrc = std.hash.crc.Crc16Umts;
 
+/// Compares an already-computed CRC (from `HeaderCrc.hash` or
+/// `FooterCrc.hash`) against the value read from the stream, returning
+/// `error.CrcMismatch` on a mismatch.
+///
+/// Callers must compute `expected` before reading any more bytes through the
+/// same `RecordingByteSource`: appending to it can reallocate its backing
+/// buffer, which would invalidate a byte slice captured earlier but hashed
+/// only later.
+fn verifyCrc(expected: anytype, actual: @TypeOf(expected)) error{CrcMismatch}!void {
+    if (actual != expected) return error.CrcMismatch;
+}
+
 /// How a frame's block size relates to the value coded after the sync code
 /// (RFC 9639 Section 9.1.2): whether the coded number is a frame number
 /// (every frame has the same block size, except possibly the last) or a
@@ -408,9 +420,11 @@ pub const FrameHeader = struct {
     pub fn readRecorded(source: *RecordingByteSource) ReadError!FrameHeader {
         const start = source.recorded.items.len;
         const header = try parseFields(source);
+        // Compute the expected CRC now, before the next `takeByte` below can
+        // reallocate `source.recorded` and invalidate a slice into it.
         const expected_crc = HeaderCrc.hash(source.recorded.items[start..]);
         const actual_crc = try source.takeByte();
-        if (actual_crc != expected_crc) return error.CrcMismatch;
+        try verifyCrc(expected_crc, actual_crc);
         return header;
     }
 
@@ -602,7 +616,7 @@ pub const Frame = struct {
 
         const expected_crc = FooterCrc.hash(source.recorded.items);
         const actual_crc = try reader.takeInt(u16, .big);
-        if (actual_crc != expected_crc) return error.CrcMismatch;
+        try verifyCrc(expected_crc, actual_crc);
 
         return .{ .header = header, .subframes = subframes };
     }
