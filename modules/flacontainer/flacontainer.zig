@@ -19,6 +19,14 @@ pub fn readMarker(reader: *std.Io.Reader) ReadMarkerError!void {
     if (!std.mem.eql(u8, bytes, constants.marker)) return error.InvalidMarker;
 }
 
+/// Reads a metadata block value of type `T` (via `T.read(reader, allocator)`)
+/// and immediately frees it (via `.deinit(allocator)`), for block types this
+/// container layer parses only to validate and advance past.
+fn parseAndDiscard(comptime T: type, reader: *std.Io.Reader, allocator: std.mem.Allocator) T.ReadError!void {
+    const value = try T.read(reader, allocator);
+    value.deinit(allocator);
+}
+
 /// A fully parsed FLAC stream: the mandatory STREAMINFO metadata block and
 /// every audio frame. Metadata blocks other than STREAMINFO are parsed (to
 /// validate them and advance the reader correctly) and then discarded, since
@@ -67,18 +75,9 @@ pub const Stream = struct {
                     const seek_table = try metadata.SeekTable.read(reader, allocator, header.length);
                     defer seek_table.deinit(allocator);
                 },
-                .vorbis_comment => {
-                    const comment = try metadata.VorbisComment.read(reader, allocator);
-                    defer comment.deinit(allocator);
-                },
-                .cue_sheet => {
-                    const cue_sheet = try metadata.CueSheet.read(reader, allocator);
-                    defer cue_sheet.deinit(allocator);
-                },
-                .picture => {
-                    const picture = try metadata.Picture.read(reader, allocator);
-                    defer picture.deinit(allocator);
-                },
+                .vorbis_comment => try parseAndDiscard(metadata.VorbisComment, reader, allocator),
+                .cue_sheet => try parseAndDiscard(metadata.CueSheet, reader, allocator),
+                .picture => try parseAndDiscard(metadata.Picture, reader, allocator),
             }
 
             if (stream_info == null and is_last) return error.MissingStreamInfo;
