@@ -65,6 +65,7 @@ Before marking any task as complete, AI agents **MUST** execute the relevant com
 | **Check Zig Formatting** | `zig fmt --check .` | Verifies Zig formatting only (usable outside the Nix shell) |
 | **Build Library** | `zig build` | Builds the `ziggyflac` and `flacontainer` static libraries |
 | **Run All Tests** | `zig build test` | Runs the tests of both modules |
+| **Nix Flake Check** | `nix flake check --all-systems` | Required when `flake.nix` or `flake.lock` change |
 
 ______________________________________________________________________
 
