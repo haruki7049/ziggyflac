@@ -282,17 +282,15 @@ pub const SubframeBody = union(enum) {
                 break :blk .{ .verbatim = samples };
             },
             .fixed => |order| blk: {
-                const warmup = try allocator.alloc(i64, order);
+                const warmup = try readWarmupSamples(bits, allocator, order, sample_width);
                 errdefer allocator.free(warmup);
-                for (warmup) |*sample| sample.* = try bits.readSignedBits(sample_width);
 
                 const residual = try Residual.read(bits, allocator, block_size, order, block_size - order);
                 break :blk .{ .fixed = .{ .warmup = warmup, .residual = residual } };
             },
             .lpc => |order| blk: {
-                const warmup = try allocator.alloc(i64, order);
+                const warmup = try readWarmupSamples(bits, allocator, order, sample_width);
                 errdefer allocator.free(warmup);
-                for (warmup) |*sample| sample.* = try bits.readSignedBits(sample_width);
 
                 const qlp_precision: u5 = @intCast(try bits.readBits(4) + 1);
                 const qlp_shift: i6 = @intCast(try bits.readSignedBits(5));
@@ -310,6 +308,15 @@ pub const SubframeBody = union(enum) {
                 } };
             },
         };
+    }
+
+    /// Reads `order` warmup samples (RFC 9639 Section 9.2.3/9.2.4), each
+    /// `sample_width` bits wide.
+    fn readWarmupSamples(bits: *BitReader, allocator: std.mem.Allocator, order: u6, sample_width: u7) ReadError![]i64 {
+        const warmup = try allocator.alloc(i64, order);
+        errdefer allocator.free(warmup);
+        for (warmup) |*sample| sample.* = try bits.readSignedBits(sample_width);
+        return warmup;
     }
 
     pub fn deinit(self: SubframeBody, allocator: std.mem.Allocator) void {
