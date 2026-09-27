@@ -374,92 +374,57 @@ pub const FrameHeader = struct {
         CrcMismatch,
     };
 
-    /// A reader wrapper that records every byte it reads, so the bytes
-    /// covered by the header CRC can be replayed into `HeaderCrc` afterwards.
-    const Collector = struct {
-        reader: *std.Io.Reader,
-        // Max header size: 2 (sync/flags) + 2 (block size/sample rate codes)
-        // + 7 (coded number) + 2 (extra block size) + 2 (extra sample rate) = 15 bytes.
-        buffer: [15]u8 = undefined,
-        len: usize = 0,
-
-        fn takeByte(self: *Collector) std.Io.Reader.Error!u8 {
-            const byte = try self.reader.takeByte();
-            self.buffer[self.len] = byte;
-            self.len += 1;
-            return byte;
-        }
-
-        fn bytes(self: *const Collector) []const u8 {
-            return self.buffer[0..self.len];
-        }
-    };
-
     /// Reads and validates a frame header from `reader`, including its CRC-8.
-    pub fn read(reader: *std.Io.Reader) ReadError!FrameHeader {
-        var collector = Collector{ .reader = reader };
-        return readFromCollector(&collector, reader);
+    /// `allocator` backs a throwaway `RecordingByteSource` used only to
+    /// gather the header's own bytes for the CRC-8 check.
+    pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!FrameHeader {
+        var source = RecordingByteSource{ .reader = reader, .allocator = allocator };
+        defer source.deinit();
+        return readRecorded(&source);
     }
 
-    /// Same as `read`, but reads through a `RecordingByteSource` so the
-    /// header bytes also become part of the whole-frame CRC-16.
+    /// Same as `read`, but reads through a shared `RecordingByteSource` so
+    /// the header bytes also become part of a whole-frame CRC-16 (the header
+    /// CRC-8 byte itself is included too, per RFC 9639 Section 9.3).
     pub fn readRecorded(source: *RecordingByteSource) ReadError!FrameHeader {
-        var collector = Collector{ .reader = source.reader };
-        // Route every byte through `source` too, so it ends up recorded.
-        // `Collector` already buffers its own copy for the header CRC-8; we
-        // additionally mirror each byte into `source.recorded` here.
-        return readFromCollectorRecording(&collector, source);
-    }
-
-    fn readFromCollector(collector: *Collector, reader: *std.Io.Reader) ReadError!FrameHeader {
-        const header = try parseFields(collector);
-        const expected_crc = HeaderCrc.hash(collector.bytes());
-        const actual_crc = try reader.takeByte();
-        if (actual_crc != expected_crc) return error.CrcMismatch;
-        return header;
-    }
-
-    fn readFromCollectorRecording(collector: *Collector, source: *RecordingByteSource) ReadError!FrameHeader {
-        const header = try parseFields(collector);
-        for (collector.bytes()) |byte| {
-            source.recorded.append(source.allocator, byte) catch @panic("OutOfMemory");
-        }
-        const expected_crc = HeaderCrc.hash(collector.bytes());
+        const start = source.recorded.items.len;
+        const header = try parseFields(source);
+        const expected_crc = HeaderCrc.hash(source.recorded.items[start..]);
         const actual_crc = try source.takeByte();
         if (actual_crc != expected_crc) return error.CrcMismatch;
         return header;
     }
 
-    fn parseFields(collector: *Collector) ReadError!FrameHeader {
-        const sync_byte = try collector.takeByte();
+    fn parseFields(source: *RecordingByteSource) ReadError!FrameHeader {
+        const sync_byte = try source.takeByte();
         if (sync_byte != 0xff) return error.InvalidSyncCode;
 
-        const flags_byte = try collector.takeByte();
+        const flags_byte = try source.takeByte();
         if (flags_byte & 0xfc != 0xf8) return error.InvalidSyncCode;
         if (flags_byte & 0b10 != 0) return error.ReservedBit;
         const blocking_strategy: BlockingStrategy = @enumFromInt(@as(u1, @intCast(flags_byte & 0b1)));
 
-        const size_rate_byte = try collector.takeByte();
+        const size_rate_byte = try source.takeByte();
         const block_size_code: u4 = @intCast(size_rate_byte >> 4);
         const sample_rate_code: u4 = @intCast(size_rate_byte & 0x0f);
 
-        const channel_sample_byte = try collector.takeByte();
+        const channel_sample_byte = try source.takeByte();
         const channel_assignment_bits: u4 = @intCast(channel_sample_byte >> 4);
         const sample_size_code: u3 = @intCast((channel_sample_byte >> 1) & 0x07);
         if (channel_sample_byte & 0b1 != 0) return error.ReservedBit;
 
         const channel_assignment = try ChannelAssignment.decode(channel_assignment_bits);
         const bits_per_sample = try decodeSampleSize(sample_size_code);
-        const coded_number = try readCodedNumber(collector);
+        const coded_number = try readCodedNumber(source);
 
         const block_size = switch (block_size_code) {
             0 => return error.ReservedBlockSize,
             1 => @as(u16, 192),
             2...5 => @as(u16, 576) << @as(u3, @intCast(block_size_code - 2)),
-            6 => @as(u16, try collector.takeByte()) + 1,
+            6 => @as(u16, try source.takeByte()) + 1,
             7 => blk: {
-                const high = try collector.takeByte();
-                const low = try collector.takeByte();
+                const high = try source.takeByte();
+                const low = try source.takeByte();
                 break :blk (@as(u16, high) << 8 | low) + 1;
             },
             8...15 => @as(u16, 256) << @as(u4, @intCast(block_size_code - 8)),
@@ -478,15 +443,15 @@ pub const FrameHeader = struct {
             9 => 44_100,
             10 => 48_000,
             11 => 96_000,
-            12 => @as(u32, try collector.takeByte()) * 1_000,
+            12 => @as(u32, try source.takeByte()) * 1_000,
             13 => blk: {
-                const high = try collector.takeByte();
-                const low = try collector.takeByte();
+                const high = try source.takeByte();
+                const low = try source.takeByte();
                 break :blk @as(u32, high) << 8 | low;
             },
             14 => blk: {
-                const high = try collector.takeByte();
-                const low = try collector.takeByte();
+                const high = try source.takeByte();
+                const low = try source.takeByte();
                 break :blk (@as(u32, high) << 8 | low) * 10;
             },
             15 => return error.ReservedSampleRate,
@@ -519,8 +484,8 @@ fn decodeSampleSize(bits: u3) error{ReservedSampleSize}!?u6 {
 /// Reads the UTF-8-like variable-length coded number that follows a frame
 /// header's fixed fields (RFC 9639 Section 9.1.5): 7 bits in 1 byte up to
 /// 36 bits in 7 bytes.
-fn readCodedNumber(collector: *FrameHeader.Collector) FrameHeader.ReadError!u36 {
-    const first = try collector.takeByte();
+fn readCodedNumber(source: *RecordingByteSource) FrameHeader.ReadError!u36 {
+    const first = try source.takeByte();
     if (first & 0x80 == 0) return first;
 
     var continuation_bytes: u3 = undefined;
@@ -549,7 +514,7 @@ fn readCodedNumber(collector: *FrameHeader.Collector) FrameHeader.ReadError!u36 
 
     var i: u3 = 0;
     while (i < continuation_bytes) : (i += 1) {
-        const continuation = try collector.takeByte();
+        const continuation = try source.takeByte();
         if (continuation & 0xc0 != 0x80) return error.InvalidCodedNumber;
         value = (value << 6) | (continuation & 0x3f);
     }
@@ -627,7 +592,7 @@ test "FrameHeader.read parses a fixed-blocksize header" {
     const crc = HeaderCrc.hash(&header_bytes);
     var reader: std.Io.Reader = .fixed(&(header_bytes ++ [_]u8{crc}));
 
-    const header = try FrameHeader.read(&reader);
+    const header = try FrameHeader.read(&reader, std.testing.allocator);
     try std.testing.expectEqual(BlockingStrategy.fixed, header.blocking_strategy);
     try std.testing.expectEqual(@as(u16, 2304), header.block_size);
     try std.testing.expectEqual(@as(?u32, 44_100), header.sample_rate);
@@ -648,7 +613,7 @@ test "FrameHeader.read parses extra block size and sample rate bytes" {
     const crc = HeaderCrc.hash(&header_bytes);
     var reader: std.Io.Reader = .fixed(&(header_bytes ++ [_]u8{crc}));
 
-    const header = try FrameHeader.read(&reader);
+    const header = try FrameHeader.read(&reader, std.testing.allocator);
     try std.testing.expectEqual(BlockingStrategy.variable, header.blocking_strategy);
     try std.testing.expectEqual(@as(u16, 4096), header.block_size);
     try std.testing.expectEqual(@as(?u32, 44_100), header.sample_rate);
@@ -658,25 +623,25 @@ test "FrameHeader.read parses extra block size and sample rate bytes" {
 
 test "FrameHeader.read rejects an invalid sync code" {
     var reader: std.Io.Reader = .fixed(&.{ 0x00, 0xf8, 0x49, 0x14, 0x00, 0x00 });
-    try std.testing.expectError(error.InvalidSyncCode, FrameHeader.read(&reader));
+    try std.testing.expectError(error.InvalidSyncCode, FrameHeader.read(&reader, std.testing.allocator));
 }
 
 test "FrameHeader.read rejects a reserved block size code" {
     const header_bytes = [_]u8{ 0xff, 0xf8, 0x09, 0x14, 0x00 };
     const crc = HeaderCrc.hash(&header_bytes);
     var reader: std.Io.Reader = .fixed(&(header_bytes ++ [_]u8{crc}));
-    try std.testing.expectError(error.ReservedBlockSize, FrameHeader.read(&reader));
+    try std.testing.expectError(error.ReservedBlockSize, FrameHeader.read(&reader, std.testing.allocator));
 }
 
 test "FrameHeader.read rejects a CRC mismatch" {
     const header_bytes = [_]u8{ 0xff, 0xf8, 0x49, 0x14, 0x00 };
     var reader: std.Io.Reader = .fixed(&(header_bytes ++ [_]u8{0x00}));
-    try std.testing.expectError(error.CrcMismatch, FrameHeader.read(&reader));
+    try std.testing.expectError(error.CrcMismatch, FrameHeader.read(&reader, std.testing.allocator));
 }
 
 test "FrameHeader.read rejects a truncated stream" {
     var reader: std.Io.Reader = .fixed(&.{0xff});
-    try std.testing.expectError(error.EndOfStream, FrameHeader.read(&reader));
+    try std.testing.expectError(error.EndOfStream, FrameHeader.read(&reader, std.testing.allocator));
 }
 
 test "BitReader reads bits, signed values, and unary codes MSB-first" {
