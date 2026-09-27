@@ -56,7 +56,7 @@ ______________________________________________________________________
 
 ## 4. Mandatory Commands & Verification Workflow
 
-Before marking any task as complete, AI agents **MUST** execute the relevant commands below and verify clean execution:
+Before marking any task as complete, AI agents **MUST** execute the relevant commands below and verify clean execution. Note that `treefmt --fail-on-change` rewrites files even when it fails, so check the working tree for resulting changes and re-run it until it passes:
 
 | Task | Command | Description |
 | :--- | :--- | :--- |
