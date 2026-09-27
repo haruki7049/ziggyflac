@@ -628,6 +628,15 @@ pub const Frame = struct {
         const bits_per_sample = header.bits_per_sample orelse stream_bits_per_sample;
         const channel_count = header.channel_assignment.channelCount();
 
+        // Reserve capacity for the rest of the frame up front, so the
+        // per-byte appends below don't repeatedly grow `source.recorded`.
+        // This is only a hint: an unusually large residual can still exceed
+        // it, and `RecordingByteSource.takeByte` grows the buffer safely
+        // (never `appendAssumeCapacity`) if that happens, since a malformed
+        // or adversarial frame must never be treated as undefined behavior.
+        const estimated_body_bytes = (@as(usize, header.block_size) * channel_count * (@as(usize, bits_per_sample) + 1) + 7) / 8;
+        source.recorded.ensureTotalCapacity(allocator, source.recorded.items.len + estimated_body_bytes) catch @panic("OutOfMemory");
+
         const subframes = try allocator.alloc(Subframe, channel_count);
         var filled: usize = 0;
         errdefer {
