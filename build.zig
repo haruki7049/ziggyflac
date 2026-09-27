@@ -5,16 +5,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Modules
-    const ziggyflac = b.addModule("ziggyflac", .{
-        .root_source_file = b.path("modules/ziggyflac/ziggyflac.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const flacontainer = b.addModule("flacontainer", .{
         .root_source_file = b.path("modules/flacontainer/flacontainer.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const ziggyflac = b.addModule("ziggyflac", .{
+        .root_source_file = b.path("modules/ziggyflac/ziggyflac.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "flacontainer", .module = flacontainer },
+        },
     });
 
     // Library installation
