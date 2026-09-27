@@ -72,12 +72,11 @@ pub const RecordingByteSource = struct {
         self.recorded.deinit(self.allocator);
     }
 
-    pub fn takeByte(self: *RecordingByteSource) std.Io.Reader.Error!u8 {
+    pub const TakeByteError = std.Io.Reader.Error || std.mem.Allocator.Error;
+
+    pub fn takeByte(self: *RecordingByteSource) TakeByteError!u8 {
         const byte = try self.reader.takeByte();
-        // Growing this buffer can only fail on OOM; a FLAC frame is always a
-        // small, bounded amount of data, so treat allocation failure as fatal
-        // rather than threading Allocator.Error through every bit read.
-        self.recorded.append(self.allocator, byte) catch @panic("OutOfMemory");
+        try self.recorded.append(self.allocator, byte);
         return byte;
     }
 };
@@ -88,7 +87,7 @@ pub const BitReader = struct {
     current_byte: u8 = 0,
     bits_remaining: u4 = 0,
 
-    pub const Error = std.Io.Reader.Error;
+    pub const Error = RecordingByteSource.TakeByteError;
 
     pub fn readBit(self: *BitReader) Error!u1 {
         if (self.bits_remaining == 0) {
@@ -432,7 +431,7 @@ pub const FrameHeader = struct {
     coded_number: u36,
 
     /// Errors returned by `read`.
-    pub const ReadError = std.Io.Reader.Error || error{
+    pub const ReadError = RecordingByteSource.TakeByteError || error{
         InvalidSyncCode,
         ReservedBit,
         ReservedBlockSize,
