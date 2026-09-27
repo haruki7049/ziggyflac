@@ -99,11 +99,27 @@ pub const BitReader = struct {
         return @intCast((self.current_byte >> @intCast(self.bits_remaining)) & 1);
     }
 
-    /// Reads `n` bits (0-64) as an unsigned integer.
+    /// Reads `n` bits (0-64) as an unsigned integer, consuming whole bytes at
+    /// a time from `source` rather than one bit at a time.
     pub fn readBits(self: *BitReader, n: u7) Error!u64 {
         var value: u64 = 0;
-        var i: u7 = 0;
-        while (i < n) : (i += 1) value = (value << 1) | try self.readBit();
+        var remaining: u7 = n;
+        while (remaining > 0) {
+            if (self.bits_remaining == 0) {
+                self.current_byte = try self.source.takeByte();
+                self.bits_remaining = 8;
+            }
+            // Take the next `take` unconsumed bits: the top `take` bits of
+            // the low `bits_remaining` bits of `current_byte`.
+            const take: u4 = @intCast(@min(@as(u8, @intCast(remaining)), self.bits_remaining));
+            const shift: u4 = self.bits_remaining - take;
+            const mask: u8 = if (take == 8) 0xff else (@as(u8, 1) << @as(u3, @intCast(take))) - 1;
+            const chunk: u8 = (self.current_byte >> @as(u3, @intCast(shift))) & mask;
+
+            value = (value << take) | chunk;
+            self.bits_remaining -= take;
+            remaining -= take;
+        }
         return value;
     }
 
@@ -116,10 +132,32 @@ pub const BitReader = struct {
     }
 
     /// Reads a unary code: the number of 0 bits before the terminating 1 bit.
+    /// Skips whole runs of zero bits within a byte via `@clz` instead of
+    /// checking one bit at a time.
     pub fn readUnary(self: *BitReader) Error!u32 {
         var count: u32 = 0;
-        while (try self.readBit() == 0) count += 1;
-        return count;
+        while (true) {
+            if (self.bits_remaining == 0) {
+                self.current_byte = try self.source.takeByte();
+                self.bits_remaining = 8;
+            }
+            const window_width = self.bits_remaining;
+            const mask: u8 = if (window_width == 8) 0xff else (@as(u8, 1) << @as(u3, @intCast(window_width))) - 1;
+            const active = self.current_byte & mask;
+
+            if (active == 0) {
+                // No terminating 1 bit in the unconsumed part of this byte.
+                count += window_width;
+                self.bits_remaining = 0;
+                continue;
+            }
+
+            const leading_in_byte = @clz(active);
+            const zeros_in_window: u4 = leading_in_byte - (8 - window_width);
+            count += zeros_in_window;
+            self.bits_remaining -= zeros_in_window + 1; // also consume the terminating 1 bit
+            return count;
+        }
     }
 
     /// Discards any partially-read byte, aligning to the next byte boundary.
@@ -706,6 +744,52 @@ test "BitReader reads bits, signed values, and unary codes MSB-first" {
     try std.testing.expectEqual(@as(i64, 4), try bits.readSignedBits(4));
     // Next byte is 0b1000_0000: unary code counts 0 zero bits (leading 1).
     try std.testing.expectEqual(@as(u32, 0), try bits.readUnary());
+}
+
+test "BitReader.readBits spans multiple byte boundaries" {
+    var source = RecordingByteSource{
+        .reader = &blk: {
+            var r: std.Io.Reader = .fixed(&.{ 0xff, 0x00, 0xff });
+            break :blk r;
+        },
+        .allocator = std.testing.allocator,
+    };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+
+    // 24 bits: 0xff 0x00 0xff, read in one call spanning all three bytes.
+    try std.testing.expectEqual(@as(u64, 0xff00ff), try bits.readBits(24));
+}
+
+test "BitReader.readBits reads an unaligned span across two bytes" {
+    var source = RecordingByteSource{
+        .reader = &blk: {
+            var r: std.Io.Reader = .fixed(&.{ 0b0000_0111, 0b1000_0000 });
+            break :blk r;
+        },
+        .allocator = std.testing.allocator,
+    };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+
+    _ = try bits.readBits(5); // discard the first 5 bits (00000)
+    // Remaining: 111 from byte 1, then 1 from byte 2 -> 0b1111.
+    try std.testing.expectEqual(@as(u64, 0b1111), try bits.readBits(4));
+}
+
+test "BitReader.readUnary counts zero bits across a whole zero byte" {
+    var source = RecordingByteSource{
+        .reader = &blk: {
+            var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0b0000_0001 });
+            break :blk r;
+        },
+        .allocator = std.testing.allocator,
+    };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+
+    // 16 zero bits from the first two bytes, then 7 more before the 1 bit.
+    try std.testing.expectEqual(@as(u32, 23), try bits.readUnary());
 }
 
 test "Subframe.read parses a CONSTANT subframe" {
