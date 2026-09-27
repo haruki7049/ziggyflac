@@ -21,17 +21,18 @@ pub const Header = struct {
     length: u24,
 
     /// Errors returned by `read`.
-    pub const ReadError = error{
+    pub const ReadError = std.Io.Reader.Error || error{
         /// The block type in the header is not one of the values defined by `BlockHeader`.
         InvalidBlockType,
-    } || std.Io.Reader.Error;
+    };
 
     /// Reads a metadata block header from `reader`.
     pub fn read(reader: *std.Io.Reader) ReadError!Header {
         const first_byte = try reader.takeByte();
         const is_last = (first_byte & 0x80) != 0;
         const type_bits: u7 = @intCast(first_byte & 0x7f);
-        const block_type = std.enums.fromInt(BlockHeader, type_bits) orelse return error.InvalidBlockType;
+        if (type_bits >= @typeInfo(BlockHeader).@"enum".fields.len) return error.InvalidBlockType;
+        const block_type: BlockHeader = @enumFromInt(type_bits);
         const length = try reader.takeVarInt(u24, .big, 3);
 
         return .{

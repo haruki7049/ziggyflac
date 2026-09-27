@@ -8,10 +8,10 @@ pub const metadata = @import("./flacontainer/metadata.zig");
 pub const audio = @import("./flacontainer/audio.zig");
 
 /// Errors returned by `readMarker`.
-pub const ReadMarkerError = error{
+pub const ReadMarkerError = std.Io.Reader.Error || error{
     /// The stream did not start with the `fLaC` marker (RFC 9639 Section 8).
     InvalidMarker,
-} || std.Io.Reader.Error;
+};
 
 /// Reads and validates the leading `fLaC` marker (RFC 9639 Section 8) from `reader`.
 pub fn readMarker(reader: *std.Io.Reader) ReadMarkerError!void {
