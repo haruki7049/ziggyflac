@@ -635,7 +635,7 @@ pub const Frame = struct {
         // (never `appendAssumeCapacity`) if that happens, since a malformed
         // or adversarial frame must never be treated as undefined behavior.
         const estimated_body_bytes = (@as(usize, header.block_size) * channel_count * (@as(usize, bits_per_sample) + 1) + 7) / 8;
-        source.recorded.ensureTotalCapacity(allocator, source.recorded.items.len + estimated_body_bytes) catch @panic("OutOfMemory");
+        try source.recorded.ensureTotalCapacity(allocator, source.recorded.items.len + estimated_body_bytes);
 
         const subframes = try allocator.alloc(Subframe, channel_count);
         var filled: usize = 0;
