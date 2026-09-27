@@ -31,12 +31,12 @@ ______________________________________________________________________
 ## 2. Strict Safety & Operational Rules (Always Enforced)
 
 - **NEVER AUTO-MERGE TO MAIN**: AI agents **MUST NEVER** merge PRs, execute `git merge`, or directly push commits to the `main` branch autonomously.
-- **NEVER PROPOSE COMMITS OR PUSHES UNPROMPTED**: AI agents **MUST NEVER** prompt the user to commit or push, nor propose commit messages unprompted. When instructed by the user or when creating/updating pull requests on topic branches, agents may execute `git commit` and `git push` directly without seeking confirmation.
+- **NEVER PROPOSE COMMITS OR PUSHES UNPROMPTED**: AI agents **MUST NEVER** prompt the user to commit or push, nor propose commit messages unprompted. When instructed by the user or when creating/updating pull requests on topic branches, agents may execute `git commit` and `git push` directly without seeking confirmation, including committing and pushing every small, discrete change individually rather than batching them, since these are not irreversible actions on a topic branch.
 - **Mandatory Human Approval**: AI agents may create branches, create commits, push topic branches, propose PRs, format code, and run test suites, but the final action of merging changes into `main` rests strictly with the human maintainer.
 - **Dedicated Branches**: Always work on a dedicated branch (e.g. `feat/stream-info`, `fix/block-size`). Do not commit directly to `main`.
 - **Verification Before Submitting**: All changes must pass `treefmt --fail-on-change`, `zig build`, and `zig build test`.
 - **Evidence First**: Base all answers and actions on actual file contents and command output. Never speculate or assume.
-- **Non-Destructive**: Never perform irreversible actions (file deletions, hard resets, force push, pushing to `main`) without explicit user approval. Pushing topic branches is allowed as described above.
+- **Non-Destructive**: Never perform irreversible actions (file deletions, hard resets, force push, pushing to `main`, deleting local or remote branches) without explicit user approval. Pushing topic branches is allowed as described above.
 - **Targeted Edits**: Make minimal, logical changes strictly necessary for the request. Do not modify unrelated files.
 - **No Unsolicited Actions on Other Branches/PRs**: Never modify, rebase, or resolve conflicts on PRs or branches without explicit user instructions.
 - **English-Only Documentation**: All repository documentation, code comments, commit messages, and PR descriptions must be written strictly in English.
