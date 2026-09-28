@@ -11,7 +11,7 @@ Prevent data loss, unwanted history changes, and broad side effects.
 Confirm before operations that may:
 
 - delete or overwrite user-authored files
-- change git history or push to remote
+- change git history that has been pushed (amend, rebase, or reset of pushed commits, and the force-push that follows), or push to `main`
 - delete, overwrite, or replace binary FLAC test fixtures
 - affect databases, secrets, or production data
 - modify files outside the repository
@@ -19,6 +19,10 @@ Confirm before operations that may:
 - install, remove, or upgrade dependencies
 
 Judge deletion and overwrite risk by impact and recoverability, not by command name alone.
+
+## Not risky (no confirmation needed)
+
+- Ordinary pushes of new commits to a topic branch (see `.agents/skills/git-commit/SKILL.md`).
 
 ## Pre-check
 
