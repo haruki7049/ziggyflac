@@ -30,7 +30,7 @@ ______________________________________________________________________
 
 ## 2. Strict Safety & Operational Rules (Always Enforced)
 
-- **NEVER AUTO-MERGE TO MAIN**: AI agents **MUST NEVER** merge PRs, execute `git merge`, or directly push commits to the `main` branch autonomously.
+- **NEVER MERGE PULL REQUESTS**: AI agents **MUST NEVER** merge PRs (including enabling auto-merge with `gh pr merge --auto`), execute `git merge` into `main`, or directly push commits to the `main` branch autonomously.
 - **NEVER PROPOSE COMMITS OR PUSHES UNPROMPTED**: AI agents **MUST NEVER** prompt the user to commit or push, nor propose commit messages unprompted. When instructed by the user or when creating/updating pull requests on topic branches, agents may execute `git commit` and `git push` directly without seeking confirmation, including committing and pushing every small, discrete change individually rather than batching them, since these are not irreversible actions on a topic branch.
 - **Mandatory Human Approval**: AI agents may create branches, create commits, push topic branches, propose PRs, format code, and run test suites, but the final action of merging changes into `main` rests strictly with the human maintainer.
 - **Dedicated Branches**: Always work on a dedicated branch (e.g. `feat/stream-info`, `fix/block-size`). Do not commit directly to `main`.
@@ -102,11 +102,11 @@ ______________________________________________________________________
 
 - **Conventional Commits**: Use conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `docs:`, `build:`, `test:`, `perf:`, `ci:`, `chore:`, `style:`, `revert:`; keep in sync with `.github/workflows/pr-conventional-commits-validation.yml`), optionally with a scope (e.g. `feat(flacontainer):`, `build(flake.lock):`). Pull request titles follow the same format.
 - **PR Creation**: Create PRs using `gh pr create`. Reference issues in the body using standard keywords (e.g. `Closes #1`).
-- **PR Merge Prohibition**: **NEVER MERGE Pull Requests.** PRs must remain open for maintainer review unless the user explicitly commands the agent to merge a specific PR.
+- **PR Merge Prohibition**: **NEVER MERGE Pull Requests.** This includes enabling auto-merge (`gh pr merge --auto`). PRs must remain open for maintainer review unless the user explicitly commands the agent to merge a specific PR.
 - **Labels**: When creating Issues or Pull Requests with `gh`, assign relevant existing labels (e.g. `feat`, `fix`, `docs`) if the repository has them. Do not create new labels without user approval.
 - **Label Policy**: Labels reflect the repository's **current state**: commit types accepted by `.github/workflows/pr-conventional-commits-validation.yml`, files that exist (e.g. `AGENTS.md`, `build.zig.zon`, `ci.yml`), modules under `modules/` (`flacontainer`, `ziggyflac`), and `.agents/skills` (`skills`). Do not add a label only because a sibling repository (e.g. `lightmix`) has it. Delete labels whose target no longer exists, and add labels when a new file, module, or workflow is introduced. Whether assigning labels is mandatory is still undecided.
 - **Versioning**: Use Semantic Versioning **without** a `v` prefix (e.g. `0.1.0`). `version` in `build.zig.zon` is the single source of truth. Never create a tag or a release by hand, and only prepare a version bump when the user asks for it.
-- **No Session Links**: Do not include AI session URLs or other internal session identifiers (e.g. a `Claude-Session:` trailer) in commit messages or PR descriptions. Such links are not accessible from outside the private session, so publishing them in this public repository serves no purpose and only confuses readers. A `Co-Authored-By:` trailer is fine. Exception: if the user explicitly states the session is public and instructs the agent to include its URL, doing so is allowed.
+- **No Session Links**: Do not include AI session URLs or other internal session identifiers (e.g. a `Claude-Session:` trailer) in commit messages, PR descriptions, issues, or comments. Such links are not accessible from outside the private session, so publishing them in this public repository serves no purpose and only confuses readers. A `Co-Authored-By:` trailer is fine. Exception: if the user explicitly states the session is public and instructs the agent to include its URL, doing so is allowed.
 
 ______________________________________________________________________
 
