@@ -265,6 +265,34 @@ test "decode reconstructs a real mono FLAC file's PCM samples" {
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
 
+test "decode reconstructs a real FLAC file spanning multiple frames, including FIXED, VERBATIM, and wasted bits" {
+    // The exact same 100-sample sine wave as "tiny.flac", but encoded with a
+    // 32-sample blocksize so it spans 4 frames instead of 1: three 32-sample
+    // FIXED-order-4 frames and a final 4-sample VERBATIM frame with
+    // wasted_bits=1 (confirmed by inspecting the parsed frames directly).
+    // Byte-identical to tiny.flac's own PCM when decoded independently via
+    // sox, so tiny.pcm doubles as its reference here too.
+    const flac_bytes = @embedFile("../testdata/multiframe.flac");
+    const pcm_bytes = @embedFile("../testdata/tiny.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expect(container_stream.frames.len > 1);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
 test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel decorrelation" {
     // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones, from
     // reference libFLAC 1.5.0 (same fixture as flacontainer's "stereo.flac"
