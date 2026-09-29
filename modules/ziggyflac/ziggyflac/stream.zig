@@ -213,3 +213,78 @@ test "decode rejects a frame whose channel count differs from STREAMINFO" {
 
     try std.testing.expectError(error.ChannelCountMismatch, decode(std.testing.allocator, stream));
 }
+
+/// Reads `bytes` as interleaved little-endian 16-bit PCM and splits it into
+/// `channel_count` planar `i64` sample arrays, for comparing against
+/// `DecodedStream.samples` in tests. Owned by the caller and freed the same
+/// way as `DecodedStream.samples`.
+fn readReferencePcm(allocator: std.mem.Allocator, bytes: []const u8, channel_count: usize) ![][]i64 {
+    const sample_count = bytes.len / (channel_count * 2);
+
+    const channels = try allocator.alloc([]i64, channel_count);
+    var filled: usize = 0;
+    errdefer {
+        for (channels[0..filled]) |samples| allocator.free(samples);
+        allocator.free(channels);
+    }
+    for (channels) |*samples| {
+        samples.* = try allocator.alloc(i64, sample_count);
+        filled += 1;
+    }
+
+    for (0..sample_count) |i| {
+        for (channels, 0..) |samples, ch| {
+            const offset = (i * channel_count + ch) * 2;
+            samples[i] = std.mem.readInt(i16, bytes[offset..][0..2], .little);
+        }
+    }
+    return channels;
+}
+
+test "decode reconstructs a real mono FLAC file's PCM samples" {
+    // 100 samples, 8 kHz, mono, 16-bit sine wave, from reference libFLAC
+    // 1.5.0 (same fixture as flacontainer's "tiny.flac" test); tiny.pcm is
+    // its reference PCM output, decoded independently via sox.
+    const flac_bytes = @embedFile("../testdata/tiny.flac");
+    const pcm_bytes = @embedFile("../testdata/tiny.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
+test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel decorrelation" {
+    // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones, from
+    // reference libFLAC 1.5.0 (same fixture as flacontainer's "stereo.flac"
+    // test); stereo.pcm is its reference PCM output, decoded independently
+    // via sox.
+    const flac_bytes = @embedFile("../testdata/stereo.flac");
+    const pcm_bytes = @embedFile("../testdata/stereo.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(std.testing.allocator, pcm_bytes, 2);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+    try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
+}
