@@ -137,6 +137,26 @@ test "readMarker rejects a truncated stream" {
     try std.testing.expectError(error.EndOfStream, readMarker(&reader));
 }
 
+test "readMarker rejects Ogg FLAC (an Ogg-encapsulated stream)" {
+    // Ogg FLAC wraps FLAC packets in an Ogg container instead of using the
+    // native marker/metadata/frame structure this reader implements; there
+    // is no Ogg-page support anywhere in this repo. An Ogg page starts with
+    // the "OggS" capture pattern, which readMarker rejects the same way as
+    // any other non-"fLaC" prefix.
+    var reader: std.Io.Reader = .fixed("OggS");
+    try std.testing.expectError(error.InvalidMarker, readMarker(&reader));
+}
+
+test "readMarker rejects a stream with a leading ID3v2 tag" {
+    // Some real-world files prepend an ID3v2 tag before the "fLaC" marker
+    // (not RFC 9639-compliant, but seen in the wild); this reader requires
+    // the marker to be the literal first 4 bytes and never scans ahead to
+    // find it, even when a valid marker and stream follow later.
+    const id3_prefix = "ID3" ++ [_]u8{ 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var reader: std.Io.Reader = .fixed(id3_prefix ++ "fLaC");
+    try std.testing.expectError(error.InvalidMarker, readMarker(&reader));
+}
+
 test "Stream.read parses a small sample FLAC stream end-to-end" {
     // STREAMINFO body: 44100 Hz, 2 channels, 16 bits per sample.
     const stream_info_body = [_]u8{
