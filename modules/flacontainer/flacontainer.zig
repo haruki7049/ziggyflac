@@ -352,6 +352,41 @@ test "Stream.read parses a real SEEKTABLE metadata block" {
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
 }
 
+test "Stream.read parses a real PICTURE metadata block" {
+    // Same as the mono fixture, plus a PICTURE block (a 1x1 PNG) added via
+    // the reference flac 1.5.0 encoder's `--picture=` (run ad hoc via
+    // `nix run nixpkgs#flac --`, not added as a project dependency).
+    // `metadata.Picture.read` itself is already unit-tested with
+    // hand-crafted bytes; this confirms `Stream.read` walks past a real
+    // PICTURE block (previously only SEEKTABLE and VORBIS_COMMENT had a
+    // real-encoder fixture exercising them end-to-end).
+    const bytes = @embedFile("testdata/picture.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 8_000), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+}
+
+test "Stream.read parses a real CUESHEET metadata block" {
+    // 588 samples (1 CD-DA sector, the minimum flac's cuesheet import
+    // accepts), 44100 Hz, 2 channels, 16-bit, plus a CUESHEET block (one
+    // track, one index point) added via the reference flac 1.5.0 encoder's
+    // `--cuesheet=`. `metadata.CueSheet.read` itself is already unit-tested
+    // with hand-crafted bytes; this confirms `Stream.read` walks past a real
+    // CUESHEET block.
+    const bytes = @embedFile("testdata/cuesheet.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 44_100), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+}
+
 test "Stream.read parses a frame-header sample rate requiring the 8-bit kHz escape" {
     // 20 samples, 37000 Hz (a multiple of 1000 not in the direct sample-rate
     // table), mono, 16-bit, encoded by the reference flac 1.5.0 encoder (run
