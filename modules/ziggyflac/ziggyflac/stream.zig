@@ -467,6 +467,34 @@ test "decode reconstructs a 4-channel independent FLAC file's PCM samples" {
     }
 }
 
+test "decode reconstructs an 8-channel independent FLAC file's PCM samples" {
+    // 50 samples, 8 kHz, 8 independent channels (each a different sine
+    // tone), encoded by SoX 14.4.2. 8 is the format's maximum channel count
+    // (ChannelAssignment.independent's count is a u4); channel.decode's
+    // independent branch has no channel-count-specific logic, so this
+    // exercises only the upper boundary beyond the 4-channel case above.
+    const flac_bytes = @embedFile("../testdata/channels8.flac");
+    const pcm_bytes = @embedFile("../testdata/channels8.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 8);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u4, 8), decoded.channels);
+    for (expected, decoded.samples) |expected_channel, actual_channel| {
+        try std.testing.expectEqualSlices(i64, expected_channel, actual_channel);
+    }
+}
+
 test "decode reconstructs a 44.1 kHz FLAC file's PCM samples" {
     // 200 samples, 44.1 kHz, mono, 16-bit sine wave, encoded by SoX 14.4.2.
     // Every other fixture uses 8 kHz; this exercises a different STREAMINFO
