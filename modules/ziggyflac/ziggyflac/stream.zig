@@ -669,3 +669,103 @@ test "decode reconstructs a real FLAC file with samples clipped to the exact 16-
     try std.testing.expect(std.mem.indexOfScalar(i64, expected[0], std.math.maxInt(i16)) != null);
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
+
+test "decode reconstructs a real FLAC file exercising FIXED orders 0 through 3" {
+    // 200 samples, 8 kHz, mono, 16-bit, four 50-sample frames each chosen to
+    // make a specific FIXED order optimal: white noise (order 0), a sawtooth
+    // (order 1), a 100 Hz sine (order 2), and a 300 Hz sine (order 3),
+    // encoded with the reference flac 1.5.0 encoder's `-l 0` (LPC disabled,
+    // so only FIXED predictors are considered; run ad hoc via
+    // `nix run nixpkgs#flac --`, not added as a project dependency). Every
+    // other real-encoder fixture that happens to use FIXED (multiframe.flac,
+    // #74) uses order 4; orders 0-3 were previously only exercised by
+    // subframe.zig's synthetic unit tests. Orders confirmed by inspecting
+    // each parsed frame's subframe type directly before committing the
+    // fixture.
+    const flac_bytes = @embedFile("../testdata/fixedorders.flac");
+    const pcm_bytes = @embedFile("../testdata/fixedorders.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), container_stream.frames.len);
+    for (container_stream.frames, 0..) |frame, order| {
+        try std.testing.expectEqual(
+            flacontainer.audio.SubframeType{ .fixed = @intCast(order) },
+            frame.subframes[0].header.subframe_type,
+        );
+    }
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
+test "decode reconstructs a real FLAC file using a non-default LPC order" {
+    // 50 samples, 8 kHz, mono, 16-bit, 440 Hz sine, encoded with the
+    // reference flac 1.5.0 encoder's `-l 2 -e` (max LPC order 2, exhaustive
+    // model search). Every other real-encoder fixture that uses LPC
+    // (tiny.flac, stereo.flac, seektable.flac) happens to use order 4; order
+    // 2 was previously only exercised by subframe.zig's synthetic unit
+    // tests. Order confirmed by inspecting the parsed frame directly.
+    const flac_bytes = @embedFile("../testdata/lpcorder2.flac");
+    const pcm_bytes = @embedFile("../testdata/lpcorder2.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(
+        flacontainer.audio.SubframeType{ .lpc = 2 },
+        container_stream.frames[0].subframes[0].header.subframe_type,
+    );
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
+test "decode reconstructs a real FLAC file using a higher non-default LPC order" {
+    // 100 samples, 8 kHz, mono, 16-bit, four summed sine tones (300, 700,
+    // 1100, 1900 Hz), encoded with the reference flac 1.5.0 encoder's
+    // `-l 6 -e` (max LPC order 6, exhaustive model search). The richer
+    // multi-tone content makes a higher order actually pay off, unlike a
+    // pure sine. Order confirmed by inspecting the parsed frame directly.
+    const flac_bytes = @embedFile("../testdata/lpcorder6.flac");
+    const pcm_bytes = @embedFile("../testdata/lpcorder6.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(
+        flacontainer.audio.SubframeType{ .lpc = 6 },
+        container_stream.frames[0].subframes[0].header.subframe_type,
+    );
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
