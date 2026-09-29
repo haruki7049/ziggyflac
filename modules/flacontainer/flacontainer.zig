@@ -380,6 +380,55 @@ test "Stream.read parses a frame-header sample rate requiring the tenths-of-Hz e
     try std.testing.expectEqual(@as(?u32, 12_340), stream.frames[0].header.sample_rate);
 }
 
+test "Stream.read parses a frame whose bits-per-sample is inherited from STREAMINFO" {
+    // Every fixture elsewhere in this test suite (and every real-encoder
+    // fixture inspected while working through #73/#85) codes bits-per-sample
+    // explicitly in the frame header; no available encoder (SoX, reference
+    // flac) was found to ever emit sample-size code 0 (RFC 9639 Section
+    // 9.1.3's "get bits-per-sample from STREAMINFO" case), so this is a
+    // hand-crafted stream instead of a real-encoder fixture.
+    //
+    // STREAMINFO body: 8000 Hz, 1 channel, 16 bits per sample, 192 total
+    // samples.
+    const stream_info_body = [_]u8{
+        0x00, 0xc0, 0x00, 0xc0,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0xf4,
+        0x00, 0xf0, 0x00, 0x00,
+        0x00, 0xc0, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    // Metadata block header: last, STREAMINFO, length 34.
+    const stream_info_header = [_]u8{ 0x80, 0x00, 0x00, 0x22 };
+
+    // Frame header: fixed blocksize, 192 samples (code 1), sample rate from
+    // STREAMINFO, 1 independent channel, sample size code 0 (from
+    // STREAMINFO), frame number 0.
+    const frame_header_body = [_]u8{ 0xff, 0xf8, 0x10, 0x00, 0x00 };
+    const frame_header_crc = audio.HeaderCrc.hash(&frame_header_body);
+    // One CONSTANT subframe, value 42, at the inherited 16-bit width.
+    const subframe_bytes = [_]u8{ 0x00, 0x00, 0x2a };
+    const frame_body = frame_header_body ++ [_]u8{frame_header_crc} ++ subframe_bytes;
+    const frame_footer_crc = audio.FooterCrc.hash(&frame_body);
+
+    const marker_bytes = [_]u8{ 'f', 'L', 'a', 'C' };
+    var reader: std.Io.Reader = .fixed(&(marker_bytes ++
+        stream_info_header ++ stream_info_body ++
+        frame_body ++ [_]u8{
+        @intCast(frame_footer_crc >> 8),
+        @intCast(frame_footer_crc & 0xff),
+    }));
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u6, null), stream.frames[0].header.bits_per_sample);
+    try std.testing.expectEqual(@as(i64, 42), stream.frames[0].subframes[0].body.constant);
+}
+
 test "Stream.read rejects a stream whose first block is not STREAMINFO" {
     // Metadata block header: last, PADDING, length 0.
     const padding_header = [_]u8{ 0x81, 0x00, 0x00, 0x00 };
