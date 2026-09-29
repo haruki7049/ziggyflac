@@ -214,12 +214,13 @@ test "decode rejects a frame whose channel count differs from STREAMINFO" {
     try std.testing.expectError(error.ChannelCountMismatch, decode(std.testing.allocator, stream));
 }
 
-/// Reads `bytes` as interleaved little-endian 16-bit PCM and splits it into
-/// `channel_count` planar `i64` sample arrays, for comparing against
-/// `DecodedStream.samples` in tests. Owned by the caller and freed the same
-/// way as `DecodedStream.samples`.
-fn readReferencePcm(allocator: std.mem.Allocator, bytes: []const u8, channel_count: usize) ![][]i64 {
-    const sample_count = bytes.len / (channel_count * 2);
+/// Reads `bytes` as interleaved little-endian `SampleType`-wide PCM and
+/// splits it into `channel_count` planar `i64` sample arrays, for comparing
+/// against `DecodedStream.samples` in tests. Owned by the caller and freed
+/// the same way as `DecodedStream.samples`.
+fn readReferencePcm(comptime SampleType: type, allocator: std.mem.Allocator, bytes: []const u8, channel_count: usize) ![][]i64 {
+    const bytes_per_sample = @divExact(@typeInfo(SampleType).int.bits, 8);
+    const sample_count = bytes.len / (channel_count * bytes_per_sample);
 
     const channels = try allocator.alloc([]i64, channel_count);
     var filled: usize = 0;
@@ -234,8 +235,8 @@ fn readReferencePcm(allocator: std.mem.Allocator, bytes: []const u8, channel_cou
 
     for (0..sample_count) |i| {
         for (channels, 0..) |samples, ch| {
-            const offset = (i * channel_count + ch) * 2;
-            samples[i] = std.mem.readInt(i16, bytes[offset..][0..2], .little);
+            const offset = (i * channel_count + ch) * bytes_per_sample;
+            samples[i] = std.mem.readInt(SampleType, bytes[offset..][0..bytes_per_sample], .little);
         }
     }
     return channels;
@@ -255,7 +256,7 @@ test "decode reconstructs a real mono FLAC file's PCM samples" {
     const decoded = try decode(std.testing.allocator, container_stream);
     defer decoded.deinit(std.testing.allocator);
 
-    const expected = try readReferencePcm(std.testing.allocator, pcm_bytes, 1);
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
     defer {
         for (expected) |samples| std.testing.allocator.free(samples);
         std.testing.allocator.free(expected);
@@ -279,7 +280,7 @@ test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel
     const decoded = try decode(std.testing.allocator, container_stream);
     defer decoded.deinit(std.testing.allocator);
 
-    const expected = try readReferencePcm(std.testing.allocator, pcm_bytes, 2);
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 2);
     defer {
         for (expected) |samples| std.testing.allocator.free(samples);
         std.testing.allocator.free(expected);
@@ -287,4 +288,100 @@ test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel
 
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
     try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
+}
+
+test "decode reconstructs an 8-bit FLAC file's PCM samples" {
+    // 50 samples, 8 kHz, mono, 8-bit sine wave, encoded by SoX 14.4.2 (a
+    // different encoder than the other fixtures, and libFLAC's smallest
+    // supported bit depth).
+    const flac_bytes = @embedFile("../testdata/bitdepth8.flac");
+    const pcm_bytes = @embedFile("../testdata/bitdepth8.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i8, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u6, 8), decoded.bits_per_sample);
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
+test "decode reconstructs a 24-bit FLAC file's PCM samples" {
+    // 50 samples, 8 kHz, mono, 24-bit sine wave, encoded by SoX 14.4.2.
+    const flac_bytes = @embedFile("../testdata/bitdepth24.flac");
+    const pcm_bytes = @embedFile("../testdata/bitdepth24.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i24, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u6, 24), decoded.bits_per_sample);
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
+test "decode reconstructs a 4-channel independent FLAC file's PCM samples" {
+    // 50 samples, 8 kHz, 4 independent channels (each a different sine
+    // tone), encoded by SoX 14.4.2. Independent channel assignment was
+    // previously only exercised with 1-2 channels.
+    const flac_bytes = @embedFile("../testdata/multichannel.flac");
+    const pcm_bytes = @embedFile("../testdata/multichannel.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 4);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u4, 4), decoded.channels);
+    for (expected, decoded.samples) |expected_channel, actual_channel| {
+        try std.testing.expectEqualSlices(i64, expected_channel, actual_channel);
+    }
+}
+
+test "decode reconstructs a 44.1 kHz FLAC file's PCM samples" {
+    // 200 samples, 44.1 kHz, mono, 16-bit sine wave, encoded by SoX 14.4.2.
+    // Every other fixture uses 8 kHz; this exercises a different STREAMINFO
+    // sample rate.
+    const flac_bytes = @embedFile("../testdata/samplerate44100.flac");
+    const pcm_bytes = @embedFile("../testdata/samplerate44100.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u20, 44_100), decoded.sample_rate);
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
