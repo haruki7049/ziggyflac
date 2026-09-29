@@ -496,6 +496,42 @@ test "decode reconstructs a 24-bit FLAC file's PCM samples" {
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
 
+test "decode reconstructs a 32-bit FLAC file's PCM samples" {
+    // 50 samples, 8 kHz, mono, 32-bit sine wave. SoX cannot write FLAC above
+    // 24-bit, so this was generated as raw signed 32-bit little-endian PCM
+    // and encoded with the reference libFLAC 1.5.0 encoder's
+    // `--force-raw-format` (run ad hoc via `nix run nixpkgs#flac --`, not
+    // added as a project dependency). Verified independently by decoding
+    // back to raw PCM with sox, confirmed byte-identical to the original
+    // generated samples.
+    //
+    // 12-bit and 20-bit (the other bits-per-sample values RFC 9639 Section
+    // 9.1.3's frame-header code can express directly) are not covered here:
+    // neither SoX nor the reference flac encoder's raw-PCM import accepts
+    // any bit depth other than 8/16/24/32 (byte-aligned containers only), so
+    // producing them would require hand-crafting a bitstream with a
+    // test-only bit-writer that doesn't exist yet in this repo - judged not
+    // worth building for this one case.
+    const flac_bytes = @embedFile("../testdata/bitdepth32.flac");
+    const pcm_bytes = @embedFile("../testdata/bitdepth32.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i32, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqual(@as(u6, 32), decoded.bits_per_sample);
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
 test "decode reconstructs a 4-channel independent FLAC file's PCM samples" {
     // 50 samples, 8 kHz, 4 independent channels (each a different sine
     // tone), encoded by SoX 14.4.2. Independent channel assignment was
