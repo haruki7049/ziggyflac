@@ -293,6 +293,26 @@ test "decode reconstructs a real FLAC file spanning multiple frames, including F
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
 
+test "decode reconstructs a real FLAC file's silence via a real CONSTANT subframe" {
+    // 50 samples of digital silence, 8 kHz, mono, 16-bit, from reference
+    // libFLAC 1.5.0 (same fixture as flacontainer's "silence.flac" test).
+    // The reference is trivially all zeros, so no separate PCM fixture is
+    // needed.
+    const flac_bytes = @embedFile("../testdata/silence.flac");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(flacontainer.audio.SubframeType.constant, container_stream.frames[0].subframes[0].header.subframe_type);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = [_]i64{0} ** 50;
+    try std.testing.expectEqualSlices(i64, &expected, decoded.samples[0]);
+}
+
 test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel decorrelation" {
     // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones, from
     // reference libFLAC 1.5.0 (same fixture as flacontainer's "stereo.flac"
