@@ -214,6 +214,28 @@ test "decode rejects a frame whose channel count differs from STREAMINFO" {
     try std.testing.expectError(error.ChannelCountMismatch, decode(std.testing.allocator, stream));
 }
 
+test "decode calls channel.decode per frame, not once for the whole stream" {
+    // Frame 0 is independent; frame 1 is left_side. If decode assumed a
+    // single stream-wide channel assignment (e.g. read from the first frame
+    // only), it would misinterpret frame 1's samples.
+    const frames = [_]flacontainer.audio.Frame{
+        try testConstantFrame(std.testing.allocator, .{ .independent = 2 }, 2, &.{ 5, -5 }),
+        try testVerbatimFrame(std.testing.allocator, .left_side, &.{ &.{ 10, 20 }, &.{ 3, 5 } }),
+    };
+    defer for (frames) |frame| frame.deinit(std.testing.allocator);
+
+    const stream: flacontainer.Stream = .{
+        .stream_info = testStreamInfo(2, 8_000, 16),
+        .frames = @constCast(&frames),
+    };
+
+    const decoded = try decode(std.testing.allocator, stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(i64, &.{ 5, 5, 10, 20 }, decoded.samples[0]);
+    try std.testing.expectEqualSlices(i64, &.{ -5, -5, 7, 15 }, decoded.samples[1]);
+}
+
 /// Reads `bytes` as interleaved little-endian `SampleType`-wide PCM and
 /// splits it into `channel_count` planar `i64` sample arrays, for comparing
 /// against `DecodedStream.samples` in tests. Owned by the caller and freed
