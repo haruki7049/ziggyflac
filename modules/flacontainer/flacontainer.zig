@@ -189,6 +189,71 @@ test "Stream.read parses a small sample FLAC stream end-to-end" {
     try std.testing.expectEqual(@as(i64, 0), stream.frames[0].subframes[0].body.constant);
 }
 
+test "Stream.read parses a variable-blocksize stream, including a multi-byte coded sample number" {
+    // STREAMINFO body: 8000 Hz, 1 channel, 16 bits per sample, 384 total
+    // samples (two 192-sample frames), block size fixed at 192 for both.
+    const stream_info_body = [_]u8{
+        0x00, 0xc0, 0x00, 0xc0,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0xf4,
+        0x00, 0xf0, 0x00, 0x00,
+        0x01, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    };
+    // Metadata block header: last, STREAMINFO, length 34.
+    const stream_info_header = [_]u8{ 0x80, 0x00, 0x00, 0x22 };
+
+    // Frame 0 header: variable blocksize, 192 samples (code 1), sample rate
+    // from STREAMINFO, 1 independent channel, 16 bits per sample, coded
+    // sample number 0 (single byte).
+    const frame0_header_body = [_]u8{ 0xff, 0xf9, 0x10, 0x08, 0x00 };
+    const frame0_header_crc = audio.HeaderCrc.hash(&frame0_header_body);
+    // One CONSTANT subframe, value 100.
+    const frame0_subframe_bytes = [_]u8{ 0x00, 0x00, 0x64 };
+    const frame0_body = frame0_header_body ++ [_]u8{frame0_header_crc} ++ frame0_subframe_bytes;
+    const frame0_footer_crc = audio.FooterCrc.hash(&frame0_body);
+
+    // Frame 1 header: same as frame 0, but its coded sample number is 192
+    // (the correct starting sample after frame 0's 192 samples, not a
+    // sequential frame index) - encoded as a 2-byte coded number (RFC 9639
+    // Section 9.1.5: 5 bits in the first byte, 6 in the continuation byte;
+    // 192 = 0b000_11000000 -> first byte top 5 bits 0b00011, continuation
+    // low 6 bits 0b000000).
+    const frame1_header_body = [_]u8{ 0xff, 0xf9, 0x10, 0x08, 0xc3, 0x80 };
+    const frame1_header_crc = audio.HeaderCrc.hash(&frame1_header_body);
+    // One CONSTANT subframe, value -50.
+    const frame1_subframe_bytes = [_]u8{ 0x00, 0xff, 0xce };
+    const frame1_body = frame1_header_body ++ [_]u8{frame1_header_crc} ++ frame1_subframe_bytes;
+    const frame1_footer_crc = audio.FooterCrc.hash(&frame1_body);
+
+    const marker_bytes = [_]u8{ 'f', 'L', 'a', 'C' };
+    var reader: std.Io.Reader = .fixed(&(marker_bytes ++
+        stream_info_header ++ stream_info_body ++
+        frame0_body ++ [_]u8{
+        @intCast(frame0_footer_crc >> 8),
+        @intCast(frame0_footer_crc & 0xff),
+    } ++ frame1_body ++ [_]u8{
+        @intCast(frame1_footer_crc >> 8),
+        @intCast(frame1_footer_crc & 0xff),
+    }));
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), stream.frames.len);
+
+    try std.testing.expectEqual(audio.BlockingStrategy.variable, stream.frames[0].header.blocking_strategy);
+    try std.testing.expectEqual(@as(u36, 0), stream.frames[0].header.coded_number);
+    try std.testing.expectEqual(@as(i64, 100), stream.frames[0].subframes[0].body.constant);
+
+    try std.testing.expectEqual(audio.BlockingStrategy.variable, stream.frames[1].header.blocking_strategy);
+    try std.testing.expectEqual(@as(u36, 192), stream.frames[1].header.coded_number);
+    try std.testing.expectEqual(@as(i64, -50), stream.frames[1].subframes[0].body.constant);
+}
+
 test "Stream.read parses a real encoder-generated FLAC file" {
     // A 100-sample, 8 kHz, mono, 16-bit sine wave encoded by `flac` 1.5.0
     // (reference libFLAC), with the seek table and padding stripped to keep
