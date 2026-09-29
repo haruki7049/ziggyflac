@@ -532,6 +532,39 @@ test "decode reconstructs a 32-bit FLAC file's PCM samples" {
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
 
+test "decode reconstructs a FLAC file with a block size requiring the 16-bit escape code" {
+    // 1000 samples, 8 kHz, mono, 16-bit, encoded as a single 1000-sample
+    // frame via the reference flac 1.5.0 encoder's `--blocksize=1000` (run ad
+    // hoc via `nix run nixpkgs#flac --`, not added as a project dependency).
+    // RFC 9639 Section 9.1.2's block-size code has direct entries only for
+    // specific sizes (192; 576-4608 by doubling; 256-32768 by doubling) plus
+    // an 8-bit escape (up to 256) and a 16-bit escape; 1000 matches none of
+    // the direct codes and exceeds the 8-bit escape's range, so flacontainer
+    // must have used the 16-bit escape to parse this frame's header at all -
+    // confirmed by inspecting the parsed frame's block_size directly before
+    // committing the fixture. `multiframe.flac` (see #74) already exercises
+    // the 8-bit escape (a 32-sample blocksize).
+    const flac_bytes = @embedFile("../testdata/largeblocksize.flac");
+    const pcm_bytes = @embedFile("../testdata/largeblocksize.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 1000), container_stream.frames[0].header.block_size);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
+
 test "decode reconstructs a 4-channel independent FLAC file's PCM samples" {
     // 50 samples, 8 kHz, 4 independent channels (each a different sine
     // tone), encoded by SoX 14.4.2. Independent channel assignment was
