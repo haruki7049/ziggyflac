@@ -332,6 +332,54 @@ test "Stream.read parses a real SEEKTABLE metadata block" {
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
 }
 
+test "Stream.read parses a frame-header sample rate requiring the 8-bit kHz escape" {
+    // 20 samples, 37000 Hz (a multiple of 1000 not in the direct sample-rate
+    // table), mono, 16-bit, encoded by the reference flac 1.5.0 encoder (run
+    // ad hoc via `nix run nixpkgs#flac --`, not added as a project
+    // dependency). RFC 9639 Section 9.1.3's sample-rate code has 11 direct
+    // entries; 37000 matches none, so the encoder must use the 8-bit-kHz
+    // escape (code 12) to represent it in the frame header at all.
+    const bytes = @embedFile("testdata/rate37000.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 37_000), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 37_000), stream.frames[0].header.sample_rate);
+}
+
+test "Stream.read parses a frame-header sample rate requiring the direct 16-bit Hz escape" {
+    // 20 samples, 11025 Hz (not a multiple of 1000 or 10, so neither the
+    // 8-bit-kHz nor tenths-of-Hz escape can represent it exactly), mono,
+    // 16-bit, encoded by the reference flac 1.5.0 encoder. The encoder must
+    // use the direct 16-bit Hz escape (code 13).
+    const bytes = @embedFile("testdata/rate11025.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 11_025), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 11_025), stream.frames[0].header.sample_rate);
+}
+
+test "Stream.read parses a frame-header sample rate requiring the tenths-of-Hz escape" {
+    // 20 samples, 12340 Hz (a multiple of 10 but not of 1000, and not a
+    // direct-Hz-representable... it is, but the encoder prefers the more
+    // compact tenths-of-Hz form when a rate is a multiple of 10), mono,
+    // 16-bit, encoded by the reference flac 1.5.0 encoder. The encoder must
+    // use the tenths-of-Hz escape (code 14) to represent it most compactly.
+    const bytes = @embedFile("testdata/rate12340.flac");
+    var reader: std.Io.Reader = .fixed(bytes);
+
+    const stream = try Stream.read(&reader, std.testing.allocator);
+    defer stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 12_340), stream.stream_info.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 12_340), stream.frames[0].header.sample_rate);
+}
+
 test "Stream.read rejects a stream whose first block is not STREAMINFO" {
     // Metadata block header: last, PADDING, length 0.
     const padding_header = [_]u8{ 0x81, 0x00, 0x00, 0x00 };
