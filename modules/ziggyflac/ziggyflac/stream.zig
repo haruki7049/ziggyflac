@@ -392,6 +392,39 @@ test "decode reconstructs a real FLAC file using right_side channel assignment" 
     try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
 }
 
+test "decode reconstructs a real FLAC file using mid_side channel assignment" {
+    // 400 samples, 8 kHz, 2 channels, 16-bit: two tones (300 Hz, 700 Hz) each
+    // mixed into both channels at a roughly 2:1 ratio (so neither channel is
+    // simply a scaled or phase-shifted copy of the other, unlike the
+    // left_side/right_side fixtures above), encoded by the reference `flac`
+    // 1.5.0 encoder at --best. SoX's FLAC writer never picked mid_side for
+    // any stereo signal shape tried; the reference encoder did, but only
+    // once enough samples (400) were present for its per-frame bit-cost
+    // estimate to favor it over left_side/right_side/independent - shorter
+    // (50-sample) versions of the same signal picked one of those instead.
+    // Channel assignment confirmed by inspecting the parsed frame directly.
+    const flac_bytes = @embedFile("../testdata/midside.flac");
+    const pcm_bytes = @embedFile("../testdata/midside.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(flacontainer.audio.ChannelAssignment.mid_side, container_stream.frames[0].header.channel_assignment);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 2);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+    try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
+}
+
 test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel decorrelation" {
     // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones, from
     // reference libFLAC 1.5.0 (same fixture as flacontainer's "stereo.flac"
