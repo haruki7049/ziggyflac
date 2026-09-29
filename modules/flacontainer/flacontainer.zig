@@ -60,20 +60,30 @@ fn skipLeadingId3v2Tag(reader: *std.Io.Reader) std.Io.Reader.Error!void {
     try reader.discardAll(body_len + footer_len);
 }
 
-/// Reads a metadata block value of type `T` (via `T.read(reader, allocator)`)
-/// and immediately frees it (via `.deinit(allocator)`), for block types this
-/// container layer parses only to validate and advance past.
-fn parseAndDiscard(comptime T: type, reader: *std.Io.Reader, allocator: std.mem.Allocator) T.ReadError!void {
-    const value = try T.read(reader, allocator);
-    value.deinit(allocator);
-}
-
-/// A fully parsed FLAC stream: the mandatory STREAMINFO metadata block and
-/// every audio frame. Metadata blocks other than STREAMINFO are parsed (to
-/// validate them and advance the reader correctly) and then discarded, since
-/// nothing in this container layer needs to keep them yet.
+/// A fully parsed FLAC stream: the mandatory STREAMINFO metadata block,
+/// every other metadata block (RFC 9639 Sections 8.4-8.8), and every audio
+/// frame.
 pub const Stream = struct {
     stream_info: metadata.StreamInfo,
+    /// Every APPLICATION block, in stream order (RFC 9639 permits zero or
+    /// more). Owned by this `Stream` and freed by `deinit`. Defaults to
+    /// empty, for callers building a `Stream` value directly instead of
+    /// through `read` (e.g. in tests).
+    applications: []metadata.Application = &.{},
+    /// The SEEKTABLE block, if present (RFC 9639 permits at most one).
+    /// Owned by this `Stream` and freed by `deinit`.
+    seek_table: ?metadata.SeekTable = null,
+    /// The VORBIS_COMMENT block, if present (RFC 9639 permits at most one).
+    /// Owned by this `Stream` and freed by `deinit`.
+    vorbis_comment: ?metadata.VorbisComment = null,
+    /// The CUESHEET block, if present (RFC 9639 permits at most one). Owned
+    /// by this `Stream` and freed by `deinit`.
+    cue_sheet: ?metadata.CueSheet = null,
+    /// Every PICTURE block, in stream order (RFC 9639 permits zero or
+    /// more). Owned by this `Stream` and freed by `deinit`. Defaults to
+    /// empty, for callers building a `Stream` value directly instead of
+    /// through `read` (e.g. in tests).
+    pictures: []metadata.Picture = &.{},
     /// Every frame in the stream, owned by this `Stream` and freed by `deinit`.
     frames: []audio.Frame,
 
@@ -90,16 +100,39 @@ pub const Stream = struct {
         error{
             /// The first metadata block was not STREAMINFO (RFC 9639 Section 7 requires it).
             MissingStreamInfo,
+            /// A second SEEKTABLE block appeared (RFC 9639 permits at most one).
+            DuplicateSeekTable,
+            /// A second VORBIS_COMMENT block appeared (RFC 9639 permits at most one).
+            DuplicateVorbisComment,
+            /// A second CUESHEET block appeared (RFC 9639 permits at most one).
+            DuplicateCueSheet,
         };
 
     /// Reads the marker, every metadata block, and every audio frame from
-    /// `reader`. `allocator` is used to parse and then immediately discard
-    /// metadata blocks other than STREAMINFO, and to allocate the returned
-    /// `frames`, which the caller frees with `deinit`.
+    /// `reader`. `allocator` backs every returned value, all owned by the
+    /// returned `Stream` and freed together by `deinit`.
     pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!Stream {
         try readMarker(reader);
 
         var stream_info: ?metadata.StreamInfo = null;
+
+        var applications: std.ArrayList(metadata.Application) = .empty;
+        errdefer {
+            for (applications.items) |application| application.deinit(allocator);
+            applications.deinit(allocator);
+        }
+        var seek_table: ?metadata.SeekTable = null;
+        errdefer if (seek_table) |value| value.deinit(allocator);
+        var vorbis_comment: ?metadata.VorbisComment = null;
+        errdefer if (vorbis_comment) |value| value.deinit(allocator);
+        var cue_sheet: ?metadata.CueSheet = null;
+        errdefer if (cue_sheet) |value| value.deinit(allocator);
+        var pictures: std.ArrayList(metadata.Picture) = .empty;
+        errdefer {
+            for (pictures.items) |picture| picture.deinit(allocator);
+            pictures.deinit(allocator);
+        }
+
         var is_last = false;
         while (!is_last) {
             const header = try metadata.Header.read(reader);
@@ -108,17 +141,20 @@ pub const Stream = struct {
             switch (header.block_type) {
                 .stream_info => stream_info = try metadata.StreamInfo.read(reader),
                 .padding => try metadata.Padding.skip(reader, header.length),
-                .application => {
-                    const application = try metadata.Application.read(reader, allocator, header.length);
-                    defer application.deinit(allocator);
-                },
+                .application => try applications.append(allocator, try metadata.Application.read(reader, allocator, header.length)),
                 .seek_table => {
-                    const seek_table = try metadata.SeekTable.read(reader, allocator, header.length);
-                    defer seek_table.deinit(allocator);
+                    if (seek_table != null) return error.DuplicateSeekTable;
+                    seek_table = try metadata.SeekTable.read(reader, allocator, header.length);
                 },
-                .vorbis_comment => try parseAndDiscard(metadata.VorbisComment, reader, allocator),
-                .cue_sheet => try parseAndDiscard(metadata.CueSheet, reader, allocator),
-                .picture => try parseAndDiscard(metadata.Picture, reader, allocator),
+                .vorbis_comment => {
+                    if (vorbis_comment != null) return error.DuplicateVorbisComment;
+                    vorbis_comment = try metadata.VorbisComment.read(reader, allocator);
+                },
+                .cue_sheet => {
+                    if (cue_sheet != null) return error.DuplicateCueSheet;
+                    cue_sheet = try metadata.CueSheet.read(reader, allocator);
+                },
+                .picture => try pictures.append(allocator, try metadata.Picture.read(reader, allocator)),
             }
 
             if (stream_info == null and is_last) return error.MissingStreamInfo;
@@ -144,11 +180,23 @@ pub const Stream = struct {
 
         return .{
             .stream_info = resolved_stream_info,
+            .applications = try applications.toOwnedSlice(allocator),
+            .seek_table = seek_table,
+            .vorbis_comment = vorbis_comment,
+            .cue_sheet = cue_sheet,
+            .pictures = try pictures.toOwnedSlice(allocator),
             .frames = try frames.toOwnedSlice(allocator),
         };
     }
 
     pub fn deinit(self: Stream, allocator: std.mem.Allocator) void {
+        for (self.applications) |application| application.deinit(allocator);
+        allocator.free(self.applications);
+        if (self.seek_table) |value| value.deinit(allocator);
+        if (self.vorbis_comment) |value| value.deinit(allocator);
+        if (self.cue_sheet) |value| value.deinit(allocator);
+        for (self.pictures) |picture| picture.deinit(allocator);
+        allocator.free(self.pictures);
         for (self.frames) |frame| frame.deinit(allocator);
         allocator.free(self.frames);
     }
@@ -352,6 +400,9 @@ test "Stream.read parses a real encoder-generated FLAC file" {
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
     try std.testing.expectEqual(@as(u16, 100), stream.frames[0].header.block_size);
     try std.testing.expectEqual(@as(usize, 1), stream.frames[0].subframes.len);
+
+    try std.testing.expectEqualStrings("reference libFLAC 1.5.0 20250211", stream.vorbis_comment.?.vendor);
+    try std.testing.expectEqual(@as(usize, 0), stream.vorbis_comment.?.comments.len);
 }
 
 test "Stream.read parses a real stereo FLAC file with channel decorrelation" {
@@ -410,6 +461,9 @@ test "Stream.read parses a real SEEKTABLE metadata block" {
 
     try std.testing.expectEqual(@as(u32, 8_000), stream.stream_info.sample_rate);
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.seek_table.?.points.len);
+    try std.testing.expectEqual(@as(u64, 0), stream.seek_table.?.points[0].sample_number);
 }
 
 test "Stream.read parses a real PICTURE metadata block" {
@@ -419,7 +473,8 @@ test "Stream.read parses a real PICTURE metadata block" {
     // `metadata.Picture.read` itself is already unit-tested with
     // hand-crafted bytes; this confirms `Stream.read` walks past a real
     // PICTURE block (previously only SEEKTABLE and VORBIS_COMMENT had a
-    // real-encoder fixture exercising them end-to-end).
+    // real-encoder fixture exercising them end-to-end), and that its data is
+    // actually retrievable via `Stream.pictures`.
     const bytes = @embedFile("testdata/picture.flac");
     var reader: std.Io.Reader = .fixed(bytes);
 
@@ -428,6 +483,14 @@ test "Stream.read parses a real PICTURE metadata block" {
 
     try std.testing.expectEqual(@as(u32, 8_000), stream.stream_info.sample_rate);
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.pictures.len);
+    try std.testing.expectEqual(metadata.PictureType.front_cover, stream.pictures[0].picture_type);
+    try std.testing.expectEqualStrings("image/png", stream.pictures[0].mime_type);
+    try std.testing.expectEqualStrings("Test cover", stream.pictures[0].description);
+    try std.testing.expectEqual(@as(u32, 1), stream.pictures[0].width);
+    try std.testing.expectEqual(@as(u32, 1), stream.pictures[0].height);
+    try std.testing.expectEqual(@as(u32, 24), stream.pictures[0].depth);
 }
 
 test "Stream.read parses a real CUESHEET metadata block" {
@@ -436,7 +499,8 @@ test "Stream.read parses a real CUESHEET metadata block" {
     // track, one index point) added via the reference flac 1.5.0 encoder's
     // `--cuesheet=`. `metadata.CueSheet.read` itself is already unit-tested
     // with hand-crafted bytes; this confirms `Stream.read` walks past a real
-    // CUESHEET block.
+    // CUESHEET block, and that its data is actually retrievable via
+    // `Stream.cue_sheet`.
     const bytes = @embedFile("testdata/cuesheet.flac");
     var reader: std.Io.Reader = .fixed(bytes);
 
@@ -445,6 +509,13 @@ test "Stream.read parses a real CUESHEET metadata block" {
 
     try std.testing.expectEqual(@as(u32, 44_100), stream.stream_info.sample_rate);
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
+
+    // flac's cuesheet import adds the lead-out track (170, CD-DA convention)
+    // after the one track imported from the .cue file.
+    try std.testing.expectEqual(@as(usize, 2), stream.cue_sheet.?.tracks.len);
+    try std.testing.expectEqual(@as(u8, 1), stream.cue_sheet.?.tracks[0].number);
+    try std.testing.expectEqual(@as(usize, 1), stream.cue_sheet.?.tracks[0].indices.len);
+    try std.testing.expectEqual(@as(u8, 170), stream.cue_sheet.?.tracks[1].number);
 }
 
 test "Stream.read parses a frame-header sample rate requiring the 8-bit kHz escape" {
@@ -598,6 +669,10 @@ test "Stream.read parses a stream with an APPLICATION metadata block" {
     try std.testing.expectEqual(@as(u32, 44_100), stream.stream_info.sample_rate);
     try std.testing.expectEqual(@as(usize, 1), stream.frames.len);
     try std.testing.expectEqual(@as(i64, 0), stream.frames[0].subframes[0].body.constant);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.applications.len);
+    try std.testing.expectEqualStrings("test", &stream.applications[0].id);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, stream.applications[0].data);
 }
 
 test "Stream.read rejects a stream whose first block is not STREAMINFO" {
@@ -606,4 +681,39 @@ test "Stream.read rejects a stream whose first block is not STREAMINFO" {
     const marker_bytes = [_]u8{ 'f', 'L', 'a', 'C' };
     var reader: std.Io.Reader = .fixed(&(marker_bytes ++ padding_header));
     try std.testing.expectError(error.MissingStreamInfo, Stream.read(&reader, std.testing.allocator));
+}
+
+test "Stream.read rejects a stream with a second VORBIS_COMMENT block" {
+    // RFC 9639 permits at most one VORBIS_COMMENT block; Stream.read can
+    // only expose a single `vorbis_comment` field, so a second one must be
+    // rejected rather than silently overwriting the first.
+    const stream_info_body = [_]u8{
+        0x10, 0x00, 0x10, 0x00,
+        0x00, 0x03, 0xe8, 0x00,
+        0x07, 0xd0, 0x0a, 0xc4,
+        0x42, 0xf0, 0x00, 0x0f,
+        0x42, 0x40, 0x00, 0x01,
+        0x02, 0x03, 0x04, 0x05,
+        0x06, 0x07, 0x08, 0x09,
+        0x0a, 0x0b, 0x0c, 0x0d,
+        0x0e, 0x0f,
+    };
+    // Metadata block header: not last, STREAMINFO, length 34.
+    const stream_info_header = [_]u8{ 0x00, 0x00, 0x00, 0x22 };
+
+    // A minimal VORBIS_COMMENT body: an empty vendor string and zero
+    // comments (4-byte vendor length + 4-byte comment count, both 0).
+    const vorbis_comment_body = [_]u8{0} ** 8;
+    // Metadata block headers: not last, then last, both VORBIS_COMMENT,
+    // length 8.
+    const vorbis_comment_header = [_]u8{ 0x04, 0x00, 0x00, 0x08 };
+    const vorbis_comment_header_last = [_]u8{ 0x84, 0x00, 0x00, 0x08 };
+
+    const marker_bytes = [_]u8{ 'f', 'L', 'a', 'C' };
+    var reader: std.Io.Reader = .fixed(&(marker_bytes ++
+        stream_info_header ++ stream_info_body ++
+        vorbis_comment_header ++ vorbis_comment_body ++
+        vorbis_comment_header_last ++ vorbis_comment_body));
+
+    try std.testing.expectError(error.DuplicateVorbisComment, Stream.read(&reader, std.testing.allocator));
 }
