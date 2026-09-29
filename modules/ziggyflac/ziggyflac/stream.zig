@@ -518,3 +518,30 @@ test "decode reconstructs a 44.1 kHz FLAC file's PCM samples" {
     try std.testing.expectEqual(@as(u20, 44_100), decoded.sample_rate);
     try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
 }
+
+test "decode reconstructs a real FLAC file with samples clipped to the exact 16-bit boundaries" {
+    // 50 samples, 8 kHz, mono, 16-bit: a sine wave heavily overdriven (+20 dB)
+    // so it repeatedly hard-clips to exactly i16's minimum (-32768) and
+    // maximum (32767), encoded by SoX 14.4.2. Every other sine-wave fixture's
+    // samples rarely land on the exact integer boundary; this catches any
+    // off-by-one or overflow bug specific to those extremes.
+    const flac_bytes = @embedFile("../testdata/clipping.flac");
+    const pcm_bytes = @embedFile("../testdata/clipping.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 1);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expect(std.mem.indexOfScalar(i64, expected[0], std.math.minInt(i16)) != null);
+    try std.testing.expect(std.mem.indexOfScalar(i64, expected[0], std.math.maxInt(i16)) != null);
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+}
