@@ -13,10 +13,51 @@ pub const ReadMarkerError = std.Io.Reader.Error || error{
     InvalidMarker,
 };
 
-/// Reads and validates the leading `fLaC` marker (RFC 9639 Section 8) from `reader`.
+/// Reads and validates the leading `fLaC` marker (RFC 9639 Section 8) from
+/// `reader`, first skipping a leading ID3v2 tag if present. RFC 9639
+/// requires the marker to be the very first bytes of the stream, but some
+/// real-world files are prefixed with an ID3v2 tag (not spec-compliant, but
+/// written by taggers unaware of FLAC's container rules); this tolerates
+/// exactly that one case rather than requiring the marker to be literally
+/// the first 4 bytes.
 pub fn readMarker(reader: *std.Io.Reader) ReadMarkerError!void {
+    try skipLeadingId3v2Tag(reader);
     const bytes = try reader.take(constants.marker.len);
     if (!std.mem.eql(u8, bytes, constants.marker)) return error.InvalidMarker;
+}
+
+/// Size of an ID3v2 header: "ID3" (3 bytes), major and minor version (1
+/// byte each), flags (1 byte), and a 4-byte synchsafe size.
+const id3v2_header_len = 10;
+/// Size of an ID3v2 footer (ID3v2.4 only, present when the header's
+/// footer-present flag is set): a fixed-size mirror of the header.
+const id3v2_footer_len = 10;
+/// The header flags byte's footer-present bit (ID3v2.4 only).
+const id3v2_footer_flag: u8 = 0x10;
+
+/// If `reader` starts with an ID3v2 tag ("ID3" followed by version, flags,
+/// and a synchsafe size), discards it entirely - header, body, and footer if
+/// present - so a `fLaC` marker following it can still be found. Does
+/// nothing if the next bytes are not "ID3".
+fn skipLeadingId3v2Tag(reader: *std.Io.Reader) std.Io.Reader.Error!void {
+    const prefix = reader.peek(3) catch |err| switch (err) {
+        error.EndOfStream => return,
+        else => |e| return e,
+    };
+    if (!std.mem.eql(u8, prefix, "ID3")) return;
+
+    const header = try reader.take(id3v2_header_len);
+    const flags = header[5];
+    const size_bytes = header[6..10];
+
+    // The size is "synchsafe": 4 bytes, each contributing its low 7 bits,
+    // most significant byte first (each byte's own top bit is always 0 in a
+    // compliant tag, so masking it off is defensive, not load-bearing).
+    var body_len: u32 = 0;
+    for (size_bytes) |byte| body_len = (body_len << 7) | (byte & 0x7f);
+
+    const footer_len: u32 = if (flags & id3v2_footer_flag != 0) id3v2_footer_len else 0;
+    try reader.discardAll(body_len + footer_len);
 }
 
 /// Reads a metadata block value of type `T` (via `T.read(reader, allocator)`)
@@ -147,14 +188,33 @@ test "readMarker rejects Ogg FLAC (an Ogg-encapsulated stream)" {
     try std.testing.expectError(error.InvalidMarker, readMarker(&reader));
 }
 
-test "readMarker rejects a stream with a leading ID3v2 tag" {
+test "readMarker skips a leading ID3v2 tag with no body" {
     // Some real-world files prepend an ID3v2 tag before the "fLaC" marker
-    // (not RFC 9639-compliant, but seen in the wild); this reader requires
-    // the marker to be the literal first 4 bytes and never scans ahead to
-    // find it, even when a valid marker and stream follow later.
-    const id3_prefix = "ID3" ++ [_]u8{ 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    var reader: std.Io.Reader = .fixed(id3_prefix ++ "fLaC");
-    try std.testing.expectError(error.InvalidMarker, readMarker(&reader));
+    // (not RFC 9639-compliant, but written by taggers unaware of FLAC's
+    // container rules); readMarker tolerates exactly this case. Header:
+    // "ID3", version 4.0, flags 0x00 (no footer), synchsafe size 0.
+    const id3_header = "ID3" ++ [_]u8{ 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var reader: std.Io.Reader = .fixed(id3_header ++ "fLaC");
+    try readMarker(&reader);
+}
+
+test "readMarker skips a leading ID3v2 tag with a body and footer" {
+    // Same as above, but with a 5-byte body (synchsafe size 5, encoded as
+    // 0x00,0x00,0x00,0x05) and the footer-present flag set (ID3v2.4 only,
+    // flags 0x10), so the reader must also skip the 10-byte footer after the
+    // body before finding the marker.
+    const id3_header = "ID3" ++ [_]u8{ 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x05 };
+    const body = [_]u8{ 'T', 'I', 'T', '2', 0xff };
+    const footer = "3DI" ++ [_]u8{ 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x05 };
+    var reader: std.Io.Reader = .fixed(id3_header ++ body ++ footer ++ "fLaC");
+    try readMarker(&reader);
+}
+
+test "readMarker rejects a stream that only looks like it might have an ID3v2 tag" {
+    // A 4-byte prefix that happens to start with "ID3" but isn't "fLaC"
+    // either, and isn't long enough to even hold a full ID3v2 header.
+    var reader: std.Io.Reader = .fixed("ID3!");
+    try std.testing.expectError(error.EndOfStream, readMarker(&reader));
 }
 
 test "Stream.read parses a small sample FLAC stream end-to-end" {
