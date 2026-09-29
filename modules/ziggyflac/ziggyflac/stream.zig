@@ -313,6 +313,63 @@ test "decode reconstructs a real FLAC file's silence via a real CONSTANT subfram
     try std.testing.expectEqualSlices(i64, &expected, decoded.samples[0]);
 }
 
+test "decode reconstructs a real FLAC file using left_side channel assignment" {
+    // 50 samples, 8 kHz, 2 channels, 16-bit: a mono tone duplicated into both
+    // channels, encoded by SoX 14.4.2. Identical channels reliably make SoX's
+    // FLAC writer pick left_side (confirmed by inspecting the parsed frame
+    // directly) - previously, the only real-encoder stereo fixture
+    // (stereo.flac) happened to use independent channel assignment, so
+    // left_side/right_side were only exercised by channel.zig's synthetic
+    // unit tests.
+    const flac_bytes = @embedFile("../testdata/leftside.flac");
+    const pcm_bytes = @embedFile("../testdata/leftside.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(flacontainer.audio.ChannelAssignment.left_side, container_stream.frames[0].header.channel_assignment);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 2);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+    try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
+}
+
+test "decode reconstructs a real FLAC file using right_side channel assignment" {
+    // 50 samples, 8 kHz, 2 channels, 16-bit: the same tone on both channels,
+    // one inverted in phase, encoded by SoX 14.4.2. Inverted-phase channels
+    // reliably make SoX's FLAC writer pick right_side (confirmed by
+    // inspecting the parsed frame directly).
+    const flac_bytes = @embedFile("../testdata/rightside.flac");
+    const pcm_bytes = @embedFile("../testdata/rightside.pcm");
+
+    var reader: std.Io.Reader = .fixed(flac_bytes);
+    const container_stream = try flacontainer.Stream.read(&reader, std.testing.allocator);
+    defer container_stream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(flacontainer.audio.ChannelAssignment.right_side, container_stream.frames[0].header.channel_assignment);
+
+    const decoded = try decode(std.testing.allocator, container_stream);
+    defer decoded.deinit(std.testing.allocator);
+
+    const expected = try readReferencePcm(i16, std.testing.allocator, pcm_bytes, 2);
+    defer {
+        for (expected) |samples| std.testing.allocator.free(samples);
+        std.testing.allocator.free(expected);
+    }
+
+    try std.testing.expectEqualSlices(i64, expected[0], decoded.samples[0]);
+    try std.testing.expectEqualSlices(i64, expected[1], decoded.samples[1]);
+}
+
 test "decode reconstructs a real stereo FLAC file's PCM samples, undoing channel decorrelation" {
     // 100 samples, 8 kHz, 2 channels, 16-bit, two different sine tones, from
     // reference libFLAC 1.5.0 (same fixture as flacontainer's "stereo.flac"
