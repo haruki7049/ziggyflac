@@ -561,7 +561,7 @@ test "Stream.read parses a frame-header sample rate requiring the 8-bit kHz esca
     // 20 samples, 37000 Hz (a multiple of 1000 not in the direct sample-rate
     // table), mono, 16-bit, encoded by the reference flac 1.5.0 encoder (run
     // ad hoc via `nix run nixpkgs#flac --`, not added as a project
-    // dependency). RFC 9639 Section 9.1.3's sample-rate code has 11 direct
+    // dependency). RFC 9639 Section 9.1.2's sample-rate code has 11 direct
     // entries; 37000 matches none, so the encoder must use the 8-bit-kHz
     // escape (code 12) to represent it in the frame header at all.
     const bytes = @embedFile("testdata/rate37000.flac");
@@ -610,7 +610,7 @@ test "Stream.read parses a frame whose bits-per-sample is inherited from STREAMI
     // fixture inspected while working through #73/#85) codes bits-per-sample
     // explicitly in the frame header; no available encoder (SoX, reference
     // flac) was found to ever emit sample-size code 0 (RFC 9639 Section
-    // 9.1.3's "get bits-per-sample from STREAMINFO" case), so this is a
+    // 9.1.4's "get bits-per-sample from STREAMINFO" case), so this is a
     // hand-crafted stream instead of a real-encoder fixture.
     //
     // STREAMINFO body: 8000 Hz, 1 channel, 16 bits per sample, 192 total

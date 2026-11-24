@@ -513,7 +513,7 @@ test "decode reconstructs a 32-bit FLAC file's PCM samples" {
     // generated samples.
     //
     // 12-bit and 20-bit (the other bits-per-sample values RFC 9639 Section
-    // 9.1.3's frame-header code can express directly) are not covered here:
+    // 9.1.4's frame-header code can express directly) are not covered here:
     // neither SoX nor the reference flac encoder's raw-PCM import accepts
     // any bit depth other than 8/16/24/32 (byte-aligned containers only), so
     // producing them would require hand-crafting a bitstream with a
@@ -543,7 +543,7 @@ test "decode reconstructs a FLAC file with a block size requiring the 16-bit esc
     // 1000 samples, 8 kHz, mono, 16-bit, encoded as a single 1000-sample
     // frame via the reference flac 1.5.0 encoder's `--blocksize=1000` (run ad
     // hoc via `nix run nixpkgs#flac --`, not added as a project dependency).
-    // RFC 9639 Section 9.1.2's block-size code has direct entries only for
+    // RFC 9639 Section 9.1.1's block-size code has direct entries only for
     // specific sizes (192; 576-4608 by doubling; 256-32768 by doubling) plus
     // an 8-bit escape (up to 256) and a 16-bit escape; 1000 matches none of
     // the direct codes and exceeds the 8-bit escape's range, so flacontainer
