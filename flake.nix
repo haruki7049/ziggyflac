@@ -33,14 +33,14 @@
           ...
         }:
         let
-          ZIG = pkgs.zig_0_16;
-          ZLS = pkgs.zls_0_16;
+          ZIG = pkgs.zig_0_17;
+          ZLS = pkgs.zls_0_17;
 
           buildInputs = [ ];
 
           nativeBuildInputs = [
             # Compiler
-            pkgs.zig_0_16
+            pkgs.zig_0_17
             pkgs.pkg-config
 
             # LSP
