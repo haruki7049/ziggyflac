@@ -33,6 +33,9 @@
           ...
         }:
         let
+          ZIG = pkgs.zig_0_16;
+          ZLS = pkgs.zls_0_16;
+
           buildInputs = [ ];
 
           nativeBuildInputs = [
@@ -42,7 +45,7 @@
 
             # LSP
             pkgs.nil
-            pkgs.zls
+            ZLS
 
             # Music Player
             pkgs.sox # Use this command as: `play result.wav`
@@ -70,7 +73,7 @@
 
             # Zig
             programs.zig.enable = true;
-            settings.formatter.zig.command = lib.getExe pkgs.zig_0_16;
+            programs.zig.package = ZIG;
 
             # GitHub Actions
             programs.actionlint.enable = true;
