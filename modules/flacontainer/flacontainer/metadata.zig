@@ -40,6 +40,15 @@ pub const Header = struct {
             .length = length,
         };
     }
+
+    /// Writes this metadata block header (RFC 9639 Section 8.1) to `writer`:
+    /// the last-block flag and block type in one byte, then the 24-bit
+    /// big-endian body length.
+    pub fn write(self: Header, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const flag: u8 = if (self.is_last) 0x80 else 0;
+        try writer.writeByte(flag | @intFromEnum(self.block_type));
+        try writer.writeInt(u24, self.length, .big);
+    }
 };
 
 /// The STREAMINFO metadata block (RFC 9639 Section 8.2): fixed-size stream
@@ -98,6 +107,42 @@ pub const StreamInfo = struct {
             .total_samples = total_samples,
             .md5_signature = md5_signature,
         };
+    }
+
+    /// The size in bytes of a STREAMINFO block body (RFC 9639 Section 8.2).
+    pub const body_length: u24 = 34;
+
+    /// Errors returned by `write`.
+    pub const WriteError = std.Io.Writer.Error || error{
+        /// `channels` is not in the 1-8 range FLAC supports (RFC 9639 Section 8.2).
+        InvalidChannelCount,
+        /// `bits_per_sample` is not in the 4-32 range FLAC supports (RFC 9639 Section 8.2).
+        InvalidBitsPerSample,
+    };
+
+    /// Writes the 34-byte STREAMINFO block body (RFC 9639 Section 8.2) to
+    /// `writer`, the inverse of `read`. The caller writes the preceding
+    /// `Header` itself. Unknown values (0 for the frame sizes and total
+    /// samples, all zeros for the MD5 signature) are written as given.
+    pub fn write(self: StreamInfo, writer: *std.Io.Writer) WriteError!void {
+        if (self.channels < 1 or self.channels > 8) return error.InvalidChannelCount;
+        if (self.bits_per_sample < 4 or self.bits_per_sample > 32) return error.InvalidBitsPerSample;
+
+        try writer.writeInt(u16, self.min_block_size, .big);
+        try writer.writeInt(u16, self.max_block_size, .big);
+        try writer.writeInt(u24, self.min_frame_size, .big);
+        try writer.writeInt(u24, self.max_frame_size, .big);
+
+        // Sample rate (20 bits), channels - 1 (3 bits), bits per sample - 1
+        // (5 bits), and total samples (36 bits) share 64 bits with no byte
+        // alignment between fields.
+        const packed_bits: u64 = (@as(u64, self.sample_rate) << 44) |
+            (@as(u64, self.channels - 1) << 41) |
+            (@as(u64, self.bits_per_sample - 1) << 36) |
+            @as(u64, self.total_samples);
+        try writer.writeInt(u64, packed_bits, .big);
+
+        try writer.writeAll(&self.md5_signature);
     }
 };
 
@@ -559,4 +604,72 @@ test "Picture.read parses metadata and owns its buffers" {
     try std.testing.expectEqual(@as(u32, 1), picture.width);
     try std.testing.expectEqual(@as(u32, 8), picture.depth);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, picture.data);
+}
+
+test "Header.write emits the last-block flag, type, and length" {
+    var buffer: [4]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try (Header{ .is_last = false, .block_type = .stream_info, .length = 34 }).write(&writer);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x22 }, &buffer);
+
+    writer = .fixed(&buffer);
+    try (Header{ .is_last = true, .block_type = .picture, .length = 0x010203 }).write(&writer);
+    try std.testing.expectEqualSlices(u8, &.{ 0x86, 0x01, 0x02, 0x03 }, &buffer);
+}
+
+test "StreamInfo.write emits the RFC 9639 Section 8.2 layout" {
+    const info = StreamInfo{
+        .min_block_size = 4096,
+        .max_block_size = 4096,
+        .min_frame_size = 0x000102,
+        .max_frame_size = 0x000304,
+        .sample_rate = 44100,
+        .channels = 2,
+        .bits_per_sample = 16,
+        .total_samples = 0x1_2345_6789,
+        .md5_signature = .{0xaa} ** 16,
+    };
+    var buffer: [StreamInfo.body_length]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try info.write(&writer);
+
+    // The 64 packed bits are: sample rate 44100 = 0x0ac44 (20 bits),
+    // channels - 1 = 0b001 (3 bits), bits per sample - 1 = 0b01111 (5 bits),
+    // total samples 0x123456789 (36 bits).
+    const expected = [_]u8{
+        0x10, 0x00, 0x10, 0x00, // min and max block size
+        0x00, 0x01, 0x02, 0x00, 0x03, 0x04, // min and max frame size
+        0x0a, 0xc4, 0x42, 0xf1, 0x23, 0x45, 0x67, 0x89, // packed fields
+    } ++ [_]u8{0xaa} ** 16;
+    try std.testing.expectEqualSlices(u8, &expected, &buffer);
+
+    var reader: std.Io.Reader = .fixed(&buffer);
+    try std.testing.expectEqual(info, try StreamInfo.read(&reader));
+}
+
+test "StreamInfo.write rejects unsupported channel counts and bit depths" {
+    var buffer: [StreamInfo.body_length]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const base = StreamInfo{
+        .min_block_size = 16,
+        .max_block_size = 16,
+        .min_frame_size = 0,
+        .max_frame_size = 0,
+        .sample_rate = 8000,
+        .channels = 1,
+        .bits_per_sample = 8,
+        .total_samples = 0,
+        .md5_signature = .{0} ** 16,
+    };
+
+    var info = base;
+    info.channels = 0;
+    try std.testing.expectError(error.InvalidChannelCount, info.write(&writer));
+    info.channels = 9;
+    try std.testing.expectError(error.InvalidChannelCount, info.write(&writer));
+    info = base;
+    info.bits_per_sample = 3;
+    try std.testing.expectError(error.InvalidBitsPerSample, info.write(&writer));
+    info.bits_per_sample = 33;
+    try std.testing.expectError(error.InvalidBitsPerSample, info.write(&writer));
 }

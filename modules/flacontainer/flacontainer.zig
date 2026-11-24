@@ -26,6 +26,12 @@ pub fn readMarker(reader: *std.Io.Reader) ReadMarkerError!void {
     if (!std.mem.eql(u8, bytes, constants.marker)) return error.InvalidMarker;
 }
 
+/// Writes the `fLaC` marker (RFC 9639 Section 6) that starts every FLAC
+/// stream to `writer`, the inverse of `readMarker`.
+pub fn writeMarker(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.writeAll(constants.marker);
+}
+
 /// Size of an ID3v2 header: "ID3" (3 bytes), major and minor version (1
 /// byte each), flags (1 byte), and a 4-byte synchsafe size.
 const id3v2_header_len = 10;
@@ -716,4 +722,14 @@ test "Stream.read rejects a stream with a second VORBIS_COMMENT block" {
         vorbis_comment_header_last ++ vorbis_comment_body));
 
     try std.testing.expectError(error.DuplicateVorbisComment, Stream.read(&reader, std.testing.allocator));
+}
+
+test "writeMarker emits a marker that readMarker accepts" {
+    var buffer: [4]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeMarker(&writer);
+    try std.testing.expectEqualSlices(u8, "fLaC", &buffer);
+
+    var reader: std.Io.Reader = .fixed(&buffer);
+    try readMarker(&reader);
 }
