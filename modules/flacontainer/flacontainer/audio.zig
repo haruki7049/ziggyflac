@@ -165,6 +165,74 @@ pub const BitReader = struct {
     }
 };
 
+/// Writes individual bits, most-significant-bit first, into a growable byte
+/// buffer. This is the inverse of `BitReader`.
+///
+/// Whole bytes are appended to `bytes` as soon as they are complete. A
+/// trailing partial byte is held back until `alignToByte` pads it with zero
+/// bits (RFC 9639 Section 9.3), so callers must call `alignToByte` before
+/// treating `bytes` as a finished byte sequence.
+pub const BitWriter = struct {
+    /// The buffer receiving completed bytes. Owned by the caller.
+    bytes: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    current_byte: u8 = 0,
+    bits_filled: u4 = 0,
+
+    pub const Error = std.mem.Allocator.Error;
+
+    pub fn writeBit(self: *BitWriter, bit: u1) Error!void {
+        try self.writeBits(bit, 1);
+    }
+
+    /// Writes the low `n` bits (0-64) of `value`, most-significant bit first.
+    /// Bits of `value` above the low `n` are ignored.
+    pub fn writeBits(self: *BitWriter, value: u64, n: u7) Error!void {
+        var remaining: u7 = n;
+        while (remaining > 0) {
+            const free: u4 = 8 - self.bits_filled;
+            const take: u4 = @intCast(@min(remaining, free));
+            // Take the next `take` bits below the ones already written.
+            const shift: u6 = @intCast(remaining - take);
+            const chunk: u16 = @intCast((value >> shift) & ((@as(u64, 1) << take) - 1));
+
+            self.current_byte = @intCast((@as(u16, self.current_byte) << take) | chunk);
+            self.bits_filled += take;
+            remaining -= take;
+
+            if (self.bits_filled == 8) {
+                try self.bytes.append(self.allocator, self.current_byte);
+                self.current_byte = 0;
+                self.bits_filled = 0;
+            }
+        }
+    }
+
+    /// Writes the low `n` bits (1-64) of `value` as a two's-complement
+    /// signed integer. `value` must be representable in `n` bits.
+    pub fn writeSignedBits(self: *BitWriter, value: i64, n: u7) Error!void {
+        try self.writeBits(@bitCast(value), n);
+    }
+
+    /// Writes a unary code: `count` 0 bits followed by a terminating 1 bit.
+    pub fn writeUnary(self: *BitWriter, count: u64) Error!void {
+        var zeros = count;
+        while (zeros > 0) {
+            const chunk: u7 = @intCast(@min(zeros, 64));
+            try self.writeBits(0, chunk);
+            zeros -= chunk;
+        }
+        try self.writeBit(1);
+    }
+
+    /// Pads any partially-written byte with zero bits up to the next byte
+    /// boundary and appends it. Does nothing when already aligned.
+    pub fn alignToByte(self: *BitWriter) Error!void {
+        if (self.bits_filled == 0) return;
+        try self.writeBits(0, 8 - @as(u7, self.bits_filled));
+    }
+};
+
 /// The type of a subframe (RFC 9639 Section 9.2.1) and, where applicable, its
 /// predictor order.
 pub const SubframeType = union(enum) {
@@ -881,4 +949,72 @@ test "Frame.read parses a small fixed-order frame and verifies both CRCs" {
     try std.testing.expectEqual(@as(usize, 2), frame.subframes.len);
     try std.testing.expectEqual(@as(i64, 0), frame.subframes[0].body.constant);
     try std.testing.expectEqual(@as(i64, 0), frame.subframes[1].body.constant);
+}
+
+test "BitWriter packs bits most-significant-bit first" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    try writer.writeBit(1);
+    try writer.writeBits(0b01, 2);
+    try writer.writeBits(0b10110, 5);
+    try writer.writeBits(0xabc, 12);
+    try writer.alignToByte();
+
+    try std.testing.expectEqualSlices(u8, &.{ 0b1011_0110, 0xab, 0xc0 }, bytes.items);
+}
+
+test "BitWriter.alignToByte does nothing when already aligned" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    try writer.writeBits(0xff, 8);
+    try writer.alignToByte();
+    try std.testing.expectEqualSlices(u8, &.{0xff}, bytes.items);
+}
+
+test "BitWriter writes a unary code" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    try writer.writeUnary(0);
+    try writer.writeUnary(3);
+    try writer.writeUnary(70);
+    try writer.alignToByte();
+
+    // "1", "0001", then 70 zeros and a 1: 5 bits + 70 + 1 = 76 bits.
+    var reader: std.Io.Reader = .fixed(bytes.items);
+    var source = RecordingByteSource{ .reader = &reader, .allocator = std.testing.allocator };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+    try std.testing.expectEqual(@as(u32, 0), try bits.readUnary());
+    try std.testing.expectEqual(@as(u32, 3), try bits.readUnary());
+    try std.testing.expectEqual(@as(u32, 70), try bits.readUnary());
+}
+
+test "BitWriter round-trips unsigned and signed values through BitReader" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    try writer.writeBits(5, 3);
+    try writer.writeBits(std.math.maxInt(u64), 64);
+    try writer.writeSignedBits(-1, 1);
+    try writer.writeSignedBits(-123456, 20);
+    try writer.writeSignedBits(std.math.minInt(i64), 64);
+    try writer.writeBits(0, 0);
+    try writer.alignToByte();
+
+    var reader: std.Io.Reader = .fixed(bytes.items);
+    var source = RecordingByteSource{ .reader = &reader, .allocator = std.testing.allocator };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+    try std.testing.expectEqual(@as(u64, 5), try bits.readBits(3));
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), try bits.readBits(64));
+    try std.testing.expectEqual(@as(i64, -1), try bits.readSignedBits(1));
+    try std.testing.expectEqual(@as(i64, -123456), try bits.readSignedBits(20));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), try bits.readSignedBits(64));
 }
