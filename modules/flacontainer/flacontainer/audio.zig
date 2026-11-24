@@ -605,8 +605,9 @@ pub const SubframeBody = union(enum) {
         }
     }
 
-    /// Reads `order` warmup samples (RFC 9639 Section 9.2.3/9.2.4), each
-    /// `sample_width` bits wide.
+    /// Reads `order` warmup samples of a FIXED or LPC subframe (RFC 9639
+    /// Sections 9.2.5 and 9.2.6), each `sample_width` bits wide and stored
+    /// unencoded as described in Section 9.2.3.
     fn readWarmupSamples(bits: *BitReader, allocator: std.mem.Allocator, order: u6, sample_width: u7) ReadError![]i64 {
         const warmup = try allocator.alloc(i64, order);
         errdefer allocator.free(warmup);
@@ -743,7 +744,7 @@ pub const FrameHeader = struct {
         return header;
     }
 
-    /// The frame sync code (RFC 9639 Section 9.1.1) spans the header's first
+    /// The frame sync code (RFC 9639 Section 9.1) spans the header's first
     /// byte and the top 6 bits of the second.
     const sync_byte_value: u8 = 0xff;
     const sync_bits_mask: u8 = 0xfc;
@@ -825,7 +826,7 @@ pub const FrameHeader = struct {
     }
 
     /// Decodes the header's 3-bit sample-size code into bits per sample, or
-    /// `null` if it must be taken from STREAMINFO (RFC 9639 Section 9.1.3).
+    /// `null` if it must be taken from STREAMINFO (RFC 9639 Section 9.1.4).
     fn decodeSampleSize(bits: u3) error{ReservedSampleSize}!?u6 {
         return switch (bits) {
             0 => null,
