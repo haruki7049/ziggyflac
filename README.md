@@ -31,7 +31,7 @@ exe.root_module.addImport("ziggyflac", ziggyflac_dep.module("ziggyflac"));
 
 ## Usage
 
-### Decoding
+### Decoding example
 
 Read a FLAC byte sequence with `flacontainer.Stream.read`, then decode it to planar PCM samples with `ziggyflac.stream.decode`. `Stream.read` accepts any `std.Io.Reader`; this example reads a whole file into memory and reads from that.
 
@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-### Encoding
+### Encoding example
 
 Pass planar PCM samples to `ziggyflac.encoder.encode`, together with any `*std.Io.Writer`. This example writes one second of a stereo sine wave to a file.
 
