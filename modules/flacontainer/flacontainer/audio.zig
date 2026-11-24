@@ -58,6 +58,29 @@ pub const ChannelAssignment = union(enum) {
             .left_side, .right_side, .mid_side => 2,
         };
     }
+
+    /// Encodes this assignment as the 4-bit channels code (RFC 9639 Section
+    /// 9.1.3, Table 16): the inverse of `decode`.
+    fn encode(self: ChannelAssignment) error{InvalidChannelCount}!u4 {
+        return switch (self) {
+            .independent => |count| if (count >= 1 and count <= 8) count - 1 else error.InvalidChannelCount,
+            .left_side => 8,
+            .right_side => 9,
+            .mid_side => 10,
+        };
+    }
+
+    /// The number of extra bits the subframe of `channel` is coded with: left/side,
+    /// right/side and mid/side decorrelation store the side channel with one
+    /// additional bit (RFC 9639 Section 9.2.3).
+    fn extraBits(self: ChannelAssignment, channel: usize) u7 {
+        return switch (self) {
+            .left_side => if (channel == 1) 1 else 0,
+            .right_side => if (channel == 0) 1 else 0,
+            .mid_side => if (channel == 1) 1 else 0,
+            .independent => 0,
+        };
+    }
 };
 
 /// A byte source that records every byte read from the underlying
@@ -257,6 +280,17 @@ pub const SubframeType = union(enum) {
         }
         return error.ReservedSubframeType;
     }
+
+    /// Encodes this type as the 6-bit subframe type code (RFC 9639 Section
+    /// 9.2.1, Table 19): the inverse of `decode`.
+    fn encode(self: SubframeType) error{InvalidPredictorOrder}!u6 {
+        return switch (self) {
+            .constant => 0,
+            .verbatim => 1,
+            .fixed => |order| if (order <= 4) 8 + @as(u6, order) else error.InvalidPredictorOrder,
+            .lpc => |order| if (order >= 1 and order <= 32) 31 + order else error.InvalidPredictorOrder,
+        };
+    }
 };
 
 /// A subframe header (RFC 9639 Section 9.2.1).
@@ -278,6 +312,27 @@ pub const SubframeHeader = struct {
         if (try bits.readBit() == 1) wasted_bits = @intCast(try bits.readUnary() + 1);
         return .{ .subframe_type = subframe_type, .wasted_bits = wasted_bits };
     }
+
+    pub const WriteError = BitWriter.Error || error{
+        /// A FIXED predictor order above 4, or an LPC order outside 1-32
+        /// (RFC 9639 Section 9.2.1).
+        InvalidPredictorOrder,
+    };
+
+    /// Writes this subframe header (RFC 9639 Section 9.2.1) to `bits`, the
+    /// inverse of `read`: the leading zero bit, the type code, and the
+    /// wasted-bits flag followed, if set, by `wasted_bits - 1` in unary
+    /// (Section 9.2.2).
+    pub fn write(self: SubframeHeader, bits: *BitWriter) WriteError!void {
+        try bits.writeBit(0);
+        try bits.writeBits(try self.subframe_type.encode(), 6);
+        if (self.wasted_bits == 0) {
+            try bits.writeBit(0);
+        } else {
+            try bits.writeBit(1);
+            try bits.writeUnary(self.wasted_bits - 1);
+        }
+    }
 };
 
 /// The Rice-coded residual of a FIXED or LPC subframe (RFC 9639 Section 9.2.7).
@@ -285,10 +340,49 @@ pub const Residual = struct {
     /// Decoded residual values, owned by this `Residual` and freed by `deinit`.
     /// Not the final audio samples: the predictor has not been applied.
     values: []i32,
+    /// The Rice parameter `write` codes `values` with. Only meaningful when
+    /// building a `Residual` to write: `read` leaves it `null`, since a
+    /// decoded residual may use a different parameter per partition.
+    rice_parameter: ?u5 = null,
 
     pub const ReadError = BitReader.Error || std.mem.Allocator.Error || error{
         ReservedResidualCodingMethod,
     };
+
+    pub const WriteError = BitWriter.Error || error{
+        /// `rice_parameter` is `null` or above 30. The escape codes 0b1111
+        /// (4-bit method) and 0b11111 (5-bit method) leave 14 and 30 as the
+        /// largest usable parameters (RFC 9639 Section 9.2.7).
+        InvalidRiceParameter,
+        /// A value is outside the range every residual must fall in: the
+        /// most negative 32-bit value, -2^31, and anything beyond it is
+        /// forbidden (RFC 9639 Section 9.2.7.3).
+        ResidualOutOfRange,
+    };
+
+    /// Writes this residual (RFC 9639 Section 9.2.7) to `bits` as a single
+    /// Rice-coded partition (partition order 0), the inverse of `read` for
+    /// that case. The 4-bit parameter coding method is used when
+    /// `rice_parameter` is 14 or less, and the 5-bit method above that
+    /// (Table 23). Escaped partitions are never written.
+    ///
+    /// On error, `bits` may hold a partial residual.
+    pub fn write(self: Residual, bits: *BitWriter) WriteError!void {
+        const parameter = self.rice_parameter orelse return error.InvalidRiceParameter;
+        if (parameter > 30) return error.InvalidRiceParameter;
+
+        const use_five_bit_parameter = parameter > 14;
+        try bits.writeBits(@intFromBool(use_five_bit_parameter), 2);
+        try bits.writeBits(0, 4); // partition order 0: one partition
+        try bits.writeBits(parameter, if (use_five_bit_parameter) 5 else 4);
+
+        for (self.values) |value| {
+            const folded = try foldResidualValue(value);
+            // Unary quotient, then the `parameter` low bits (Section 9.2.7.2).
+            try bits.writeUnary(folded >> parameter);
+            try bits.writeBits(folded, parameter);
+        }
+    }
 
     /// Reads the residual for `sample_count` values (`block_size - predictor_order`).
     pub fn read(
@@ -345,6 +439,18 @@ pub const Residual = struct {
         allocator.free(self.values);
     }
 };
+
+/// Folds a signed residual value into the unsigned zigzag form that is Rice
+/// coded (RFC 9639 Section 9.2.7.2): positive values are doubled, negative
+/// values are multiplied by -2 and have 1 subtracted.
+fn foldResidualValue(value: i32) error{ResidualOutOfRange}!u64 {
+    if (value == std.math.minInt(i32)) return error.ResidualOutOfRange;
+    const wide: i64 = value;
+    return if (wide >= 0)
+        @as(u64, @intCast(wide)) << 1
+    else
+        (@as(u64, @intCast(-wide)) << 1) - 1;
+}
 
 /// Reads one residual value stored as a raw `raw_bits`-wide signed integer
 /// (the escape code for a partition whose Rice parameter equals the maximum
@@ -439,6 +545,37 @@ pub const SubframeBody = union(enum) {
         };
     }
 
+    pub const WriteError = BitWriter.Error || Residual.WriteError || error{
+        /// The body kind has no writer yet: only VERBATIM and FIXED bodies
+        /// can be written.
+        UnsupportedSubframeType,
+        /// The number of samples held by the body (warmup samples plus
+        /// residual values for FIXED) differs from `block_size`.
+        BlockSizeMismatch,
+    };
+
+    /// Writes this subframe body (RFC 9639 Sections 9.2.4 and 9.2.5) to
+    /// `bits`, the inverse of `read`. `sample_width` is the width every
+    /// verbatim or warmup sample is stored with (see `read`), and
+    /// `block_size` the number of samples the body must account for. Only
+    /// VERBATIM and FIXED bodies can be written; samples must fit
+    /// `sample_width` bits, which is the caller's to guarantee. A FIXED
+    /// body's residual is written with `Residual.write`.
+    pub fn write(self: SubframeBody, bits: *BitWriter, sample_width: u7, block_size: u16) WriteError!void {
+        switch (self) {
+            .verbatim => |samples| {
+                if (samples.len != block_size) return error.BlockSizeMismatch;
+                for (samples) |sample| try bits.writeSignedBits(sample, sample_width);
+            },
+            .fixed => |fixed| {
+                if (fixed.warmup.len + fixed.residual.values.len != block_size) return error.BlockSizeMismatch;
+                for (fixed.warmup) |sample| try bits.writeSignedBits(sample, sample_width);
+                try fixed.residual.write(bits);
+            },
+            .constant, .lpc => return error.UnsupportedSubframeType,
+        }
+    }
+
     /// Reads `order` warmup samples (RFC 9639 Section 9.2.3/9.2.4), each
     /// `sample_width` bits wide.
     fn readWarmupSamples(bits: *BitReader, allocator: std.mem.Allocator, order: u6, sample_width: u7) ReadError![]i64 {
@@ -477,6 +614,38 @@ pub const Subframe = struct {
         const effective_width = sample_width - header.wasted_bits;
         const body = try SubframeBody.read(bits, allocator, header.subframe_type, effective_width, block_size);
         return .{ .header = header, .body = body };
+    }
+
+    pub const WriteError = SubframeHeader.WriteError || SubframeBody.WriteError || error{
+        /// `header.subframe_type` does not describe `body`, or a FIXED
+        /// body's warmup length differs from the predictor order.
+        SubframeTypeMismatch,
+        /// `header.wasted_bits` leaves no bits per sample (RFC 9639 Section 9.2.2).
+        InvalidWastedBits,
+    };
+
+    /// Writes the subframe header followed by its body (RFC 9639 Section
+    /// 9.2) to `bits`, the inverse of `read`. `sample_width` is the width of
+    /// the subframe's samples before wasted bits are removed (see `read`).
+    /// The body's samples must already have `header.wasted_bits` removed.
+    pub fn write(self: Subframe, bits: *BitWriter, sample_width: u7, block_size: u16) WriteError!void {
+        const matches = switch (self.body) {
+            .constant => self.header.subframe_type == .constant,
+            .verbatim => self.header.subframe_type == .verbatim,
+            .fixed => |fixed| switch (self.header.subframe_type) {
+                .fixed => |order| fixed.warmup.len == order,
+                else => false,
+            },
+            .lpc => |lpc| switch (self.header.subframe_type) {
+                .lpc => |order| lpc.warmup.len == order,
+                else => false,
+            },
+        };
+        if (!matches) return error.SubframeTypeMismatch;
+        if (self.header.wasted_bits >= sample_width) return error.InvalidWastedBits;
+
+        try self.header.write(bits);
+        try self.body.write(bits, sample_width - self.header.wasted_bits, block_size);
     }
 
     pub fn deinit(self: Subframe, allocator: std.mem.Allocator) void {
@@ -628,7 +797,165 @@ pub const FrameHeader = struct {
             7 => 32,
         };
     }
+
+    /// Errors returned by `write`.
+    pub const WriteError = BitWriter.Error || error{
+        /// The block size is 0, which no block size code can express (RFC 9639
+        /// Section 9.1.1).
+        InvalidBlockSize,
+        /// `sample_rate` has no dedicated sample rate code; pass `null` to
+        /// refer to STREAMINFO instead (RFC 9639 Section 9.1.2). `write`
+        /// never emits the uncommon sample rate codes.
+        UnsupportedSampleRate,
+        /// `bits_per_sample` has no dedicated bit depth code; pass `null` to
+        /// refer to STREAMINFO instead (RFC 9639 Section 9.1.4).
+        UnsupportedBitsPerSample,
+        /// The channel count of an independent assignment is not in 1-8
+        /// (RFC 9639 Section 9.1.3).
+        InvalidChannelCount,
+        /// `coded_number` does not fit the coded number encoding: 31 bits for
+        /// a frame number (fixed blocking strategy) or 36 bits for a sample
+        /// number (variable blocking strategy) (RFC 9639 Section 9.1.5).
+        InvalidCodedNumber,
+    };
+
+    /// The 4-bit sample rate code (RFC 9639 Section 9.1.2, Table 15) of a
+    /// sample rate that has a dedicated code, or `null` if it has none.
+    pub fn sampleRateCode(sample_rate: u32) ?u4 {
+        return switch (sample_rate) {
+            88_200 => 1,
+            176_400 => 2,
+            192_000 => 3,
+            8_000 => 4,
+            16_000 => 5,
+            22_050 => 6,
+            24_000 => 7,
+            32_000 => 8,
+            44_100 => 9,
+            48_000 => 10,
+            96_000 => 11,
+            else => null,
+        };
+    }
+
+    /// The 3-bit bit depth code (RFC 9639 Section 9.1.4, Table 17) of a bit
+    /// depth that has a dedicated code, or `null` if it has none.
+    pub fn bitsPerSampleCode(bits_per_sample: u6) ?u3 {
+        return switch (bits_per_sample) {
+            8 => 1,
+            12 => 2,
+            16 => 4,
+            20 => 5,
+            24 => 6,
+            32 => 7,
+            else => null,
+        };
+    }
+
+    /// Appends this frame header (RFC 9639 Section 9.1), including its
+    /// trailing CRC-8 (Section 9.1.8), to `out`, the inverse of `read`.
+    ///
+    /// A block size without a dedicated code is written as an uncommon block
+    /// size: 8 bits for sizes up to 256 and 16 bits above. A `null`
+    /// `sample_rate` or `bits_per_sample` is written as the code that refers
+    /// to STREAMINFO. Block sizes of 1-15 are only valid in the last frame of
+    /// a stream (Section 9.1.6); that rule is the caller's to uphold.
+    ///
+    /// `out` already containing bytes is fine: only the bytes appended by this
+    /// call are covered by the CRC-8. On error, `out` may hold a partial header.
+    pub fn write(self: FrameHeader, allocator: std.mem.Allocator, out: *std.ArrayList(u8)) WriteError!void {
+        const start = out.items.len;
+        var bits = BitWriter{ .bytes = out, .allocator = allocator };
+
+        if (self.block_size == 0) return error.InvalidBlockSize;
+        const block_size_code: u4 = switch (self.block_size) {
+            192 => 1,
+            576 => 2,
+            1152 => 3,
+            2304 => 4,
+            4608 => 5,
+            256 => 8,
+            512 => 9,
+            1024 => 10,
+            2048 => 11,
+            4096 => 12,
+            8192 => 13,
+            16384 => 14,
+            32768 => 15,
+            else => if (self.block_size <= 256) 6 else 7,
+        };
+
+        const sample_rate_code: u4 = if (self.sample_rate) |rate|
+            sampleRateCode(rate) orelse return error.UnsupportedSampleRate
+        else
+            0;
+        const sample_size_code: u3 = if (self.bits_per_sample) |depth|
+            bitsPerSampleCode(depth) orelse return error.UnsupportedBitsPerSample
+        else
+            0;
+
+        // Frame sync code (15 bits), then the blocking strategy bit.
+        try bits.writeBits(0b111111111111100, 15);
+        try bits.writeBit(@intFromEnum(self.blocking_strategy));
+        try bits.writeBits(block_size_code, 4);
+        try bits.writeBits(sample_rate_code, 4);
+        try bits.writeBits(try self.channel_assignment.encode(), 4);
+        try bits.writeBits(sample_size_code, 3);
+        try bits.writeBit(0); // reserved
+
+        const coded_number_limit: u36 = switch (self.blocking_strategy) {
+            .fixed => std.math.maxInt(u31),
+            .variable => std.math.maxInt(u36),
+        };
+        if (self.coded_number > coded_number_limit) return error.InvalidCodedNumber;
+        try writeCodedNumber(&bits, self.coded_number);
+
+        switch (block_size_code) {
+            6 => try bits.writeBits(self.block_size - 1, 8),
+            7 => try bits.writeBits(self.block_size - 1, 16),
+            else => {},
+        }
+
+        // The header is a whole number of bytes at this point, so the CRC-8
+        // covers exactly the bytes appended since `start`.
+        try bits.writeBits(HeaderCrc.hash(out.items[start..]), 8);
+    }
 };
+
+/// Writes `value` as the UTF-8-like variable-length coded number of RFC 9639
+/// Section 9.1.5 (Table 18): 7 bits in 1 byte up to 36 bits in 7 bytes.
+fn writeCodedNumber(bits: *BitWriter, value: u36) BitWriter.Error!void {
+    const byte_count: u6 = if (value < 1 << 7)
+        1
+    else if (value < 1 << 11)
+        2
+    else if (value < 1 << 16)
+        3
+    else if (value < 1 << 21)
+        4
+    else if (value < 1 << 26)
+        5
+    else if (value < 1 << 31)
+        6
+    else
+        7;
+
+    if (byte_count == 1) return bits.writeBits(value, 8);
+
+    // The first byte holds `byte_count` leading 1 bits, a 0 bit, and the
+    // most significant payload bits; each continuation byte holds 10 and 6
+    // payload bits. The 7-byte form's first byte (0xfe) holds no payload.
+    const continuation_bytes = byte_count - 1;
+    const leading_ones: u8 = ~(@as(u8, 0xff) >> @intCast(byte_count));
+    const first_payload: u8 = if (byte_count == 7) 0 else @intCast(value >> (6 * @as(u6, continuation_bytes)));
+    try bits.writeBits(leading_ones | first_payload, 8);
+
+    var i: u6 = continuation_bytes;
+    while (i > 0) {
+        i -= 1;
+        try bits.writeBits(0x80 | ((value >> (6 * i)) & 0x3f), 8);
+    }
+}
 
 /// Reads the UTF-8-like variable-length coded number that follows a frame
 /// header's fixed fields (RFC 9639 Section 9.1.5): 7 bits in 1 byte up to
@@ -716,12 +1043,7 @@ pub const Frame = struct {
         while (channel < channel_count) : (channel += 1) {
             // Left/side and mid/side decorrelation store one channel with an
             // extra bit of width (RFC 9639 Section 9.2).
-            const extra_bit: u7 = switch (header.channel_assignment) {
-                .left_side => if (channel == 1) 1 else 0,
-                .right_side => if (channel == 0) 1 else 0,
-                .mid_side => if (channel == 1) 1 else 0,
-                .independent => 0,
-            };
+            const extra_bit = header.channel_assignment.extraBits(channel);
             subframes[filled] = try Subframe.read(&bit_reader, allocator, bits_per_sample + extra_bit, header.block_size);
             filled += 1;
         }
@@ -733,6 +1055,42 @@ pub const Frame = struct {
         try verifyCrc(expected_crc, actual_crc);
 
         return .{ .header = header, .subframes = subframes };
+    }
+
+    pub const WriteError = FrameHeader.WriteError || Subframe.WriteError || error{
+        /// The number of subframes differs from the header's channel assignment.
+        ChannelCountMismatch,
+    };
+
+    /// Appends this whole frame (RFC 9639 Section 9) to `out`, the inverse
+    /// of `read`: the header with its CRC-8, one subframe per channel, zero
+    /// padding up to a byte boundary, and the CRC-16 footer (Section 9.3).
+    /// `stream_bits_per_sample` is used when the header carries no bit depth
+    /// of its own. See `Subframe.write` for what the subframes must hold.
+    ///
+    /// `out` already containing bytes is fine: only the bytes appended by
+    /// this call are covered by the CRC-16. On error, `out` may hold a
+    /// partial frame.
+    pub fn write(
+        self: Frame,
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        stream_bits_per_sample: u6,
+    ) WriteError!void {
+        if (self.subframes.len != self.header.channel_assignment.channelCount()) return error.ChannelCountMismatch;
+
+        const start = out.items.len;
+        try self.header.write(allocator, out);
+
+        const bits_per_sample = self.header.bits_per_sample orelse stream_bits_per_sample;
+        var bits = BitWriter{ .bytes = out, .allocator = allocator };
+        for (self.subframes, 0..) |subframe, channel| {
+            const extra_bit = self.header.channel_assignment.extraBits(channel);
+            try subframe.write(&bits, bits_per_sample + extra_bit, self.header.block_size);
+        }
+        try bits.alignToByte();
+
+        try bits.writeBits(FooterCrc.hash(out.items[start..]), 16);
     }
 
     pub fn deinit(self: Frame, allocator: std.mem.Allocator) void {
@@ -1017,4 +1375,314 @@ test "BitWriter round-trips unsigned and signed values through BitReader" {
     try std.testing.expectEqual(@as(i64, -1), try bits.readSignedBits(1));
     try std.testing.expectEqual(@as(i64, -123456), try bits.readSignedBits(20));
     try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), try bits.readSignedBits(64));
+}
+
+test "FrameHeader.write matches a hand-assembled fixed-blocksize header" {
+    // Same layout as the `FrameHeader.read` test: sync + fixed (0xff 0xf8),
+    // block size code 0100 (2304) and sample rate code 1001 (44100),
+    // independent 2ch (0001) and 16 bits (100), reserved 0, frame number 0.
+    const header_bytes = [_]u8{ 0xff, 0xf8, 0x49, 0x18, 0x00 };
+    const expected = header_bytes ++ [_]u8{HeaderCrc.hash(&header_bytes)};
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try (FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 2304,
+        .sample_rate = 44100,
+        .channel_assignment = .{ .independent = 2 },
+        .bits_per_sample = 16,
+        .coded_number = 0,
+    }).write(std.testing.allocator, &out);
+    try std.testing.expectEqualSlices(u8, &expected, out.items);
+}
+
+test "FrameHeader.write emits uncommon block sizes and STREAMINFO references" {
+    // Block size 100 -> code 0110 + 8-bit (100 - 1) after the coded number;
+    // no dedicated sample rate or bit depth -> codes 0000 and 000;
+    // 3 channels -> 0010; frame number 200 -> two coded-number bytes.
+    const short = [_]u8{ 0xff, 0xf8, 0x60, 0x20, 0xc3, 0x88, 99 };
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try (FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 100,
+        .sample_rate = null,
+        .channel_assignment = .{ .independent = 3 },
+        .bits_per_sample = null,
+        .coded_number = 200,
+    }).write(std.testing.allocator, &out);
+    try std.testing.expectEqualSlices(u8, &(short ++ [_]u8{HeaderCrc.hash(&short)}), out.items);
+
+    // Block size 1000 -> code 0111 + 16-bit (1000 - 1 = 0x03e7); 12 bits -> 010;
+    // 8 channels -> 0111; sample rate 96000 -> 1011.
+    const long = [_]u8{ 0xff, 0xf8, 0x7b, 0x74, 0x00, 0x03, 0xe7 };
+    out.clearRetainingCapacity();
+    try (FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 1000,
+        .sample_rate = 96000,
+        .channel_assignment = .{ .independent = 8 },
+        .bits_per_sample = 12,
+        .coded_number = 0,
+    }).write(std.testing.allocator, &out);
+    try std.testing.expectEqualSlices(u8, &(long ++ [_]u8{HeaderCrc.hash(&long)}), out.items);
+}
+
+test "FrameHeader.write round-trips every block size code through read" {
+    const block_sizes = [_]u16{ 1, 15, 16, 100, 192, 255, 256, 257, 576, 1000, 1152, 2304, 4608, 4096, 8192, 16384, 32768, 65535 };
+    for (block_sizes) |block_size| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(std.testing.allocator);
+        const header = FrameHeader{
+            .blocking_strategy = .fixed,
+            .block_size = block_size,
+            .sample_rate = 44100,
+            .channel_assignment = .{ .independent = 1 },
+            .bits_per_sample = 16,
+            .coded_number = 3,
+        };
+        try header.write(std.testing.allocator, &out);
+
+        var reader: std.Io.Reader = .fixed(out.items);
+        const parsed = try FrameHeader.read(&reader, std.testing.allocator);
+        try std.testing.expectEqual(header, parsed);
+    }
+}
+
+test "FrameHeader.write round-trips every dedicated sample rate and bit depth" {
+    const rates = [_]u32{ 88200, 176400, 192000, 8000, 16000, 22050, 24000, 32000, 44100, 48000, 96000 };
+    const depths = [_]u6{ 8, 12, 16, 20, 24, 32 };
+    for (rates) |rate| for (depths) |depth| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(std.testing.allocator);
+        const header = FrameHeader{
+            .blocking_strategy = .fixed,
+            .block_size = 4096,
+            .sample_rate = rate,
+            .channel_assignment = .{ .independent = 2 },
+            .bits_per_sample = depth,
+            .coded_number = 0,
+        };
+        try header.write(std.testing.allocator, &out);
+        var reader: std.Io.Reader = .fixed(out.items);
+        try std.testing.expectEqual(header, try FrameHeader.read(&reader, std.testing.allocator));
+    };
+}
+
+test "FrameHeader.write round-trips coded numbers of every length" {
+    const numbers = [_]u36{ 0, 127, 128, 2047, 2048, 65535, 65536, 0x1fffff, 0x200000, 0x3ffffff, 0x4000000, 0x7fffffff, 0x80000000, 0xfffffffff };
+    for (numbers) |number| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(std.testing.allocator);
+        const header = FrameHeader{
+            .blocking_strategy = .variable,
+            .block_size = 4096,
+            .sample_rate = 44100,
+            .channel_assignment = .mid_side,
+            .bits_per_sample = 16,
+            .coded_number = number,
+        };
+        try header.write(std.testing.allocator, &out);
+        var reader: std.Io.Reader = .fixed(out.items);
+        try std.testing.expectEqual(header, try FrameHeader.read(&reader, std.testing.allocator));
+    }
+}
+
+test "FrameHeader.write rejects values the header cannot express" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    const base = FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 4096,
+        .sample_rate = 44100,
+        .channel_assignment = .{ .independent = 2 },
+        .bits_per_sample = 16,
+        .coded_number = 0,
+    };
+
+    var header = base;
+    header.block_size = 0;
+    try std.testing.expectError(error.InvalidBlockSize, header.write(std.testing.allocator, &out));
+    header = base;
+    header.sample_rate = 12345;
+    try std.testing.expectError(error.UnsupportedSampleRate, header.write(std.testing.allocator, &out));
+    header = base;
+    header.bits_per_sample = 9;
+    try std.testing.expectError(error.UnsupportedBitsPerSample, header.write(std.testing.allocator, &out));
+    header = base;
+    header.channel_assignment = .{ .independent = 9 };
+    try std.testing.expectError(error.InvalidChannelCount, header.write(std.testing.allocator, &out));
+    header = base;
+    header.coded_number = 0x80000000; // 32 bits: too big for a frame number
+    try std.testing.expectError(error.InvalidCodedNumber, header.write(std.testing.allocator, &out));
+    header.blocking_strategy = .variable; // but fine as a sample number
+    try header.write(std.testing.allocator, &out);
+}
+
+test "SubframeHeader.write matches hand-assembled bytes and round-trips" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    // 0 | 000001 (VERBATIM) | 0 (no wasted bits)
+    try (SubframeHeader{ .subframe_type = .verbatim, .wasted_bits = 0 }).write(&writer);
+    // 0 | 001000 (FIXED order 0) | 1 + unary(2) = 001 (3 wasted bits)
+    try (SubframeHeader{ .subframe_type = .{ .fixed = 0 }, .wasted_bits = 3 }).write(&writer);
+    try writer.alignToByte();
+    try std.testing.expectEqualSlices(u8, &.{ 0b0000_0010, 0b0001_0001, 0b0010_0000 }, bytes.items);
+
+    var reader: std.Io.Reader = .fixed(bytes.items);
+    var source = RecordingByteSource{ .reader = &reader, .allocator = std.testing.allocator };
+    defer source.deinit();
+    var bits = BitReader{ .source = &source };
+    const first = try SubframeHeader.read(&bits);
+    try std.testing.expectEqual(SubframeType.verbatim, first.subframe_type);
+    const second = try SubframeHeader.read(&bits);
+    try std.testing.expectEqual(SubframeType{ .fixed = 0 }, second.subframe_type);
+    try std.testing.expectEqual(@as(u6, 3), second.wasted_bits);
+}
+
+test "SubframeHeader.write rejects predictor orders outside the format" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+    try std.testing.expectError(error.InvalidPredictorOrder, (SubframeHeader{ .subframe_type = .{ .fixed = 5 }, .wasted_bits = 0 }).write(&writer));
+    try std.testing.expectError(error.InvalidPredictorOrder, (SubframeHeader{ .subframe_type = .{ .lpc = 0 }, .wasted_bits = 0 }).write(&writer));
+    try std.testing.expectError(error.InvalidPredictorOrder, (SubframeHeader{ .subframe_type = .{ .lpc = 33 }, .wasted_bits = 0 }).write(&writer));
+}
+
+test "Residual.write codes folded values with a Rice parameter, matching hand-assembled bits" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    // Values 0, -1, 2, 19 fold to 0, 1, 4, 38. With parameter 3:
+    // 0 -> 1 000, 1 -> 1 001, 4 -> 1 100, 38 -> 00001 110 (RFC 9639 Section 9.2.7.2).
+    var values = [_]i32{ 0, -1, 2, 19 };
+    try (Residual{ .values = &values, .rice_parameter = 3 }).write(&writer);
+    try writer.alignToByte();
+
+    // Method 00, partition order 0000, parameter 0011, then the code words:
+    // 00 0000 0011 | 1000 1001 1100 00001110 -> padded.
+    try std.testing.expectEqualSlices(u8, &.{ 0b0000_0000, 0b1110_0010, 0b0111_0000, 0b0011_1000 }, bytes.items);
+}
+
+test "Residual.write round-trips through Residual.read for both parameter widths" {
+    // Extreme values only go with large parameters: a small parameter would
+    // turn them into a unary code billions of bits long.
+    const small = [_]i32{ 0, 1, -1, 1000, -1000, 7 };
+    const extreme = [_]i32{ 0, std.math.maxInt(i32), -std.math.maxInt(i32), 7 };
+    const cases = [_]struct { parameter: u5, values: []const i32 }{
+        .{ .parameter = 0, .values = &small },
+        .{ .parameter = 1, .values = &small },
+        .{ .parameter = 7, .values = &small },
+        .{ .parameter = 14, .values = &small },
+        .{ .parameter = 15, .values = &small },
+        .{ .parameter = 22, .values = &extreme },
+        .{ .parameter = 30, .values = &extreme },
+    };
+    for (cases) |case| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(std.testing.allocator);
+        var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+        const owned = try std.testing.allocator.dupe(i32, case.values);
+        defer std.testing.allocator.free(owned);
+        try (Residual{ .values = owned, .rice_parameter = case.parameter }).write(&writer);
+        try writer.alignToByte();
+
+        var reader: std.Io.Reader = .fixed(bytes.items);
+        var source = RecordingByteSource{ .reader = &reader, .allocator = std.testing.allocator };
+        defer source.deinit();
+        var bits = BitReader{ .source = &source };
+        const count: u16 = @intCast(case.values.len);
+        const parsed = try Residual.read(&bits, std.testing.allocator, count, 0, count);
+        defer parsed.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(i32, case.values, parsed.values);
+    }
+}
+
+test "Residual.write rejects a missing or oversized parameter and out-of-range values" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = BitWriter{ .bytes = &bytes, .allocator = std.testing.allocator };
+
+    var values = [_]i32{1};
+    try std.testing.expectError(error.InvalidRiceParameter, (Residual{ .values = &values }).write(&writer));
+    try std.testing.expectError(error.InvalidRiceParameter, (Residual{ .values = &values, .rice_parameter = 31 }).write(&writer));
+    values[0] = std.math.minInt(i32);
+    try std.testing.expectError(error.ResidualOutOfRange, (Residual{ .values = &values, .rice_parameter = 3 }).write(&writer));
+}
+
+test "Frame.write produces a frame Frame.read parses, with both CRCs" {
+    const allocator = std.testing.allocator;
+    const header = FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 4,
+        .sample_rate = null,
+        .channel_assignment = .{ .independent = 2 },
+        .bits_per_sample = null,
+        .coded_number = 0,
+    };
+
+    var verbatim_samples = [_]i64{ 1, -2, 3, -4 };
+    var residual_values = [_]i32{ 5, -6, 7, -8 };
+    const subframes = [_]Subframe{
+        .{
+            .header = .{ .subframe_type = .verbatim, .wasted_bits = 0 },
+            .body = .{ .verbatim = &verbatim_samples },
+        },
+        .{
+            .header = .{ .subframe_type = .{ .fixed = 0 }, .wasted_bits = 0 },
+            .body = .{ .fixed = .{
+                .warmup = &.{},
+                .residual = .{ .values = &residual_values, .rice_parameter = 2 },
+            } },
+        },
+    };
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.append(allocator, 0x55); // pre-existing bytes must not affect the CRCs
+    try (Frame{ .header = header, .subframes = @constCast(&subframes) }).write(allocator, &out, 8);
+
+    var reader: std.Io.Reader = .fixed(out.items[1..]);
+    const frame = try Frame.read(&reader, allocator, 8);
+    defer frame.deinit(allocator);
+    try std.testing.expectEqualSlices(i64, &verbatim_samples, frame.subframes[0].body.verbatim);
+    try std.testing.expectEqualSlices(i32, &residual_values, frame.subframes[1].body.fixed.residual.values);
+}
+
+test "Frame.write rejects mismatched subframes" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var samples = [_]i64{ 1, 2, 3, 4 };
+    const verbatim = Subframe{
+        .header = .{ .subframe_type = .verbatim, .wasted_bits = 0 },
+        .body = .{ .verbatim = &samples },
+    };
+    const header = FrameHeader{
+        .blocking_strategy = .fixed,
+        .block_size = 4,
+        .sample_rate = null,
+        .channel_assignment = .{ .independent = 2 },
+        .bits_per_sample = null,
+        .coded_number = 0,
+    };
+
+    var one = [_]Subframe{verbatim};
+    try std.testing.expectError(error.ChannelCountMismatch, (Frame{ .header = header, .subframes = &one }).write(allocator, &out, 8));
+
+    var mismatched = verbatim;
+    mismatched.header.subframe_type = .{ .fixed = 1 };
+    var scratch = BitWriter{ .bytes = &out, .allocator = allocator };
+    try std.testing.expectError(error.SubframeTypeMismatch, mismatched.write(&scratch, 8, 4));
+
+    var wasted = verbatim;
+    wasted.header.wasted_bits = 8;
+    var bits = BitWriter{ .bytes = &out, .allocator = allocator };
+    try std.testing.expectError(error.InvalidWastedBits, wasted.write(&bits, 8, 4));
+    try std.testing.expectError(error.BlockSizeMismatch, verbatim.write(&bits, 8, 5));
 }
