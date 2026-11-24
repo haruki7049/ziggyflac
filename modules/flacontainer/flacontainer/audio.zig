@@ -744,13 +744,21 @@ pub const FrameHeader = struct {
         return header;
     }
 
-    /// The frame sync code (RFC 9639 Section 9.1) spans the header's first
-    /// byte and the top 6 bits of the second.
+    /// The frame sync code (RFC 9639 Section 9.1) is 15 bits, `0b111111111111100`:
+    /// the whole first header byte and the top 7 bits of the second, which are
+    /// checked below as `sync_byte_value`, `sync_bits_mask` with `sync_bits_value`,
+    /// and `reserved_flag_mask`. The last bit of the second byte is the
+    /// blocking strategy bit, not part of the sync code.
+    ///
+    /// The first header byte, which is entirely sync code.
     const sync_byte_value: u8 = 0xff;
+    /// Selects the top 6 bits of the second header byte, the first 6 of the
+    /// sync code's remaining 7 bits.
     const sync_bits_mask: u8 = 0xfc;
+    /// The value the bits selected by `sync_bits_mask` must have.
     const sync_bits_value: u8 = 0xf8;
-    /// Reserved bit (must be 0) in the second header byte, just before the
-    /// blocking-strategy bit.
+    /// Selects the last of the sync code's 15 bits, in the second header byte
+    /// just before the blocking strategy bit. It must be 0.
     const reserved_flag_mask: u8 = 0b10;
 
     fn parseFields(source: *RecordingByteSource) ReadError!FrameHeader {
