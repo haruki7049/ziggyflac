@@ -11,7 +11,7 @@ The encoder is deliberately minimal: it produces correct streams, not small ones
 
 ## Requirements
 
-Zig 0.16.0. This is the `minimum_zig_version` in `build.zig.zon`, and the version the tests are run with.
+Zig 0.17.1. This is the `minimum_zig_version` in `build.zig.zon`, and the version the tests are run with.
 
 ## Installation
 
@@ -148,7 +148,7 @@ Any other sample rate or bit depth is written as a reference to STREAMINFO inste
 
 ## Development
 
-Zig 0.16.0 is required. A [Nix](https://nixos.org/) development shell with the formatters is defined in `flake.nix`.
+Zig 0.17.1 is required. A [Nix](https://nixos.org/) development shell with the formatters is defined in `flake.nix`.
 
 ```sh
 zig build        # builds the ziggyflac and flacontainer static libraries

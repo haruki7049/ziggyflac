@@ -742,7 +742,7 @@ test "Stream.read rejects a stream with a second VORBIS_COMMENT block" {
 
     // A minimal VORBIS_COMMENT body: an empty vendor string and zero
     // comments (4-byte vendor length + 4-byte comment count, both 0).
-    const vorbis_comment_body = [_]u8{0} ** 8;
+    const vorbis_comment_body = @as([8]u8, @splat(0));
     // Metadata block headers: not last, then last, both VORBIS_COMMENT,
     // length 8.
     const vorbis_comment_header = [_]u8{ 0x04, 0x00, 0x00, 0x08 };

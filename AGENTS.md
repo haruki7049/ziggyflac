@@ -15,7 +15,7 @@ ______________________________________________________________________
   - **Explicit over Implicit**: Never silently accept malformed input. Return precise errors for invalid markers, block types, sizes, and CRC mismatches.
   - **Spec Fidelity**: Follow the FLAC specification (RFC 9639). Reference the relevant section in doc comments when implementing a structure.
 - **Development Environment**: Managed with Nix (`flake.nix`), `direnv`, and `treefmt-nix` for formatting Zig, Nix, GitHub Actions, Markdown, and shell scripts. `treefmt` is available on `PATH` inside `nix develop` (or via direnv) through the default devShell's `inputsFrom`.
-- **Target Language Version**: Zig `0.16.0` (`minimum_zig_version` in `build.zig.zon`).
+- **Target Language Version**: Zig `0.17.1` (`minimum_zig_version` in `build.zig.zon`).
 - **Directory Structure**:
   - `modules/flacontainer/flacontainer.zig`: Entry point of the `flacontainer` module (low-level FLAC container structure, e.g. `constants.marker`).
   - `modules/flacontainer/flacontainer/metadata.zig`: Metadata block definitions (`BlockHeader`, etc.).

@@ -106,7 +106,7 @@ fn testStreamInfo(channels: u4, sample_rate: u20, bits_per_sample: u6) flacontai
         .channels = channels,
         .bits_per_sample = bits_per_sample,
         .total_samples = 0,
-        .md5_signature = [_]u8{0} ** 16,
+        .md5_signature = @splat(0),
     };
 }
 
@@ -338,7 +338,7 @@ test "decode reconstructs a real FLAC file's silence via a real CONSTANT subfram
     const decoded = try decode(std.testing.allocator, container_stream);
     defer decoded.deinit(std.testing.allocator);
 
-    const expected = [_]i64{0} ** 50;
+    const expected = @as([50]i64, @splat(0));
     try std.testing.expectEqualSlices(i64, &expected, decoded.samples[0]);
 }
 

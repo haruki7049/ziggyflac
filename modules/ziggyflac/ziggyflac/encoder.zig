@@ -148,7 +148,7 @@ pub fn encode(
         .channels = @intCast(samples.len),
         .bits_per_sample = options.bits_per_sample,
         .total_samples = 0,
-        .md5_signature = .{0} ** 16,
+        .md5_signature = @splat(0),
     };
     switch (options.stream_info_mode) {
         .complete => {
@@ -275,7 +275,7 @@ const max_rice_parameter = 30;
 /// the cost of every parameter is computed in a single pass. The smallest
 /// parameter wins a tie. `values` must not contain -2^31.
 pub fn riceParameter(values: []const i32) u5 {
-    var costs = [_]u64{0} ** (max_rice_parameter + 1);
+    var costs: [max_rice_parameter + 1]u64 = @splat(0);
     for (values) |value| {
         const wide: i64 = value;
         const folded: u64 = if (wide >= 0)
@@ -587,7 +587,7 @@ test "encode in unknown mode writes 0 for what Section 8.2 allows to be unknown"
     try std.testing.expectEqual(@as(u24, 0), info.min_frame_size);
     try std.testing.expectEqual(@as(u24, 0), info.max_frame_size);
     try std.testing.expectEqual(@as(u36, 0), info.total_samples);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &info.md5_signature);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &info.md5_signature);
 }
 
 test "encode computes the same MD5 signature as libFLAC for real files" {
@@ -660,7 +660,7 @@ test "encode round-trips real files decoded from libFLAC output, in both modes" 
 
 test "encode in fixed0 mode falls back to VERBATIM for a block with a sample of -2^31" {
     const allocator = std.testing.allocator;
-    var channel = [_]i64{0} ** 32;
+    var channel = @as([32]i64, @splat(0));
     channel[3] = std.math.minInt(i32); // first block only
     channel[20] = std.math.maxInt(i32); // second block: still a valid residual
     const samples = [_][]const i64{&channel};
@@ -704,7 +704,7 @@ test "encode rejects invalid input before writing anything" {
     const one_channel = [_][]const i64{&ok};
 
     try std.testing.expectError(error.InvalidChannelCount, encode(allocator, &writer, &.{}, base));
-    const nine = [_][]const i64{&ok} ** 9;
+    const nine: [9][]const i64 = @splat(&ok);
     try std.testing.expectError(error.InvalidChannelCount, encode(allocator, &writer, &nine, base));
 
     var options = base;
@@ -735,7 +735,7 @@ test "encode rejects invalid input before writing anything" {
 
 test "riceParameter picks the parameter with the shortest code" {
     // All zeros fold to 0: parameter 0 costs 1 bit each.
-    try std.testing.expectEqual(@as(u5, 0), riceParameter(&([_]i32{0} ** 16)));
+    try std.testing.expectEqual(@as(u5, 0), riceParameter(&(@as([16]i32, @splat(0)))));
     try std.testing.expectEqual(@as(u5, 0), riceParameter(&.{}));
 
     // Brute force: no other parameter may beat the chosen one.
