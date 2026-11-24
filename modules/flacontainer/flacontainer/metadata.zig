@@ -3,12 +3,20 @@ const std = @import("std");
 /// The metadata block type, stored in the low 7 bits of a metadata block
 /// header's first byte (RFC 9639 Section 8.1).
 pub const BlockHeader = enum(u7) {
+    /// STREAMINFO (type 0): properties of the whole stream (Section 8.2).
     stream_info,
+    /// PADDING (type 1): unused space (Section 8.3).
     padding,
+    /// APPLICATION (type 2): data for third-party applications (Section 8.4).
     application,
+    /// SEEKTABLE (type 3): seek points (Section 8.5).
     seek_table,
+    /// VORBIS_COMMENT (type 4): UTF-8 tags (Section 8.6).
     vorbis_comment,
+    /// CUESHEET (type 5): track and index points (Section 8.7).
     cue_sheet,
+    /// PICTURE (type 6): an image (Section 8.8). Types 7-126 are reserved and
+    /// type 127 is forbidden (Table 2), so neither has a value here.
     picture,
 };
 
@@ -16,13 +24,18 @@ pub const BlockHeader = enum(u7) {
 /// and block type, followed by a 24-bit big-endian block length in bytes
 /// (not including the header itself).
 pub const Header = struct {
+    /// Whether this is the last metadata block before the first audio frame.
     is_last: bool,
+    /// The type of the block this header describes.
     block_type: BlockHeader,
+    /// Length in bytes of the block body that follows, not including this header.
     length: u24,
 
     /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.Error || error{
-        /// The block type in the header is not one of the values defined by `BlockHeader`.
+        /// The block type in the header is not one of the values defined by
+        /// `BlockHeader`: a reserved type (7-126) or the forbidden type 127
+        /// (RFC 9639 Section 8.1, Table 2).
         InvalidBlockType,
     };
 
@@ -158,10 +171,12 @@ pub const Padding = struct {
 /// The APPLICATION metadata block (RFC 9639 Section 8.4): a 4-byte
 /// registered application ID followed by application-defined data.
 pub const Application = struct {
+    /// The registered application ID (RFC 9639 Section 8.4).
     id: [4]u8,
     /// Application-defined data, owned by this `Application` and freed by `deinit`.
     data: []u8,
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.ReadAllocError;
 
     /// Reads an APPLICATION block body of `length` bytes from `reader`.
@@ -172,6 +187,7 @@ pub const Application = struct {
         return .{ .id = id, .data = data };
     }
 
+    /// Frees `data`. `allocator` must be the one passed to `read`.
     pub fn deinit(self: Application, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
     }
@@ -187,6 +203,7 @@ pub const SeekPoint = struct {
     /// Number of samples in the target frame.
     frame_samples: u16,
 
+    /// Reads one 18-byte seek point (RFC 9639 Section 8.5.1) from `reader`.
     pub fn read(reader: *std.Io.Reader) std.Io.Reader.Error!SeekPoint {
         return .{
             .sample_number = try reader.takeInt(u64, .big),
@@ -204,6 +221,7 @@ pub const SeekTable = struct {
     /// Size in bytes of a single seek point.
     pub const point_size: u24 = 18;
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.Error || std.mem.Allocator.Error;
 
     /// Reads a SEEKTABLE block body of `length` bytes from `reader`.
@@ -216,18 +234,22 @@ pub const SeekTable = struct {
         return .{ .points = points };
     }
 
+    /// Frees `points`. `allocator` must be the one passed to `read`.
     pub fn deinit(self: SeekTable, allocator: std.mem.Allocator) void {
         allocator.free(self.points);
     }
 };
 
-/// A single field of a VORBIS_COMMENT metadata block, in `NAME=VALUE` form.
+/// The VORBIS_COMMENT metadata block (RFC 9639 Section 8.6): a vendor string
+/// and a list of `NAME=VALUE` comment fields, all UTF-8 and not validated by
+/// `read`.
 pub const VorbisComment = struct {
     /// Vendor string, owned by this `VorbisComment` and freed by `deinit`.
     vendor: []u8,
     /// `NAME=VALUE` comment strings, owned by this `VorbisComment` and freed by `deinit`.
     comments: [][]u8,
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.ReadAllocError;
 
     /// Reads a VORBIS_COMMENT block body from `reader` (RFC 9639 Section 8.6).
@@ -253,6 +275,7 @@ pub const VorbisComment = struct {
         return .{ .vendor = vendor, .comments = comments };
     }
 
+    /// Frees `vendor` and `comments`. `allocator` must be the one passed to `read`.
     pub fn deinit(self: VorbisComment, allocator: std.mem.Allocator) void {
         allocator.free(self.vendor);
         for (self.comments) |comment| allocator.free(comment);
@@ -262,9 +285,12 @@ pub const VorbisComment = struct {
 
 /// A single index point of a CUESHEET track (RFC 9639 Section 8.7).
 pub const CueSheetIndex = struct {
+    /// Offset in samples, relative to the track offset, of the index point.
     offset: u64,
+    /// The track index point number.
     number: u8,
 
+    /// Reads one index point (RFC 9639 Section 8.7.1.1) from `reader`.
     pub fn read(reader: *std.Io.Reader) std.Io.Reader.Error!CueSheetIndex {
         const offset = try reader.takeInt(u64, .big);
         const number = try reader.takeByte();
@@ -275,16 +301,27 @@ pub const CueSheetIndex = struct {
 
 /// A single track of a CUESHEET metadata block (RFC 9639 Section 8.7).
 pub const CueSheetTrack = struct {
+    /// Track offset of the first index point in samples, relative to the
+    /// beginning of the FLAC audio stream.
     offset: u64,
+    /// Track number (RFC 9639 Section 8.7.1).
     number: u8,
+    /// Track ISRC (International Standard Recording Code), 12 ASCII characters,
+    /// or 12 zero bytes if the track has none.
     isrc: [12]u8,
+    /// Whether this is an audio track (track type bit 0) rather than a
+    /// non-audio one (track type bit 1).
     is_audio: bool,
+    /// Whether the pre-emphasis flag is set.
     pre_emphasis: bool,
     /// Index points, owned by this `CueSheetTrack` and freed by `deinit`.
     indices: []CueSheetIndex,
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.Error || std.mem.Allocator.Error;
 
+    /// Reads one track (RFC 9639 Section 8.7.1), with its index points, from
+    /// `reader`. The returned value owns `indices` and must be freed with `deinit`.
     pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!CueSheetTrack {
         const offset = try reader.takeInt(u64, .big);
         const number = try reader.takeByte();
@@ -307,6 +344,7 @@ pub const CueSheetTrack = struct {
         };
     }
 
+    /// Frees `indices`. `allocator` must be the one passed to `read`.
     pub fn deinit(self: CueSheetTrack, allocator: std.mem.Allocator) void {
         allocator.free(self.indices);
     }
@@ -315,12 +353,16 @@ pub const CueSheetTrack = struct {
 /// The CUESHEET metadata block (RFC 9639 Section 8.7): cue sheet data akin to
 /// a CD-DA table of contents.
 pub const CueSheet = struct {
+    /// Media catalog number in ASCII, right-padded with zero bytes.
     media_catalog_number: [128]u8,
+    /// Number of lead-in samples. Meaningful only for CD-DA cuesheets.
     lead_in_samples: u64,
+    /// Whether the cuesheet corresponds to a CD-DA.
     is_cd: bool,
     /// Tracks, owned by this `CueSheet` and freed by `deinit`.
     tracks: []CueSheetTrack,
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.Error || std.mem.Allocator.Error;
 
     /// Reads a CUESHEET block body from `reader`.
@@ -351,13 +393,17 @@ pub const CueSheet = struct {
         };
     }
 
+    /// Frees `tracks` and every track's index points. `allocator` must be the
+    /// one passed to `read`.
     pub fn deinit(self: CueSheet, allocator: std.mem.Allocator) void {
         for (self.tracks) |track| track.deinit(allocator);
         allocator.free(self.tracks);
     }
 };
 
-/// The picture type of a PICTURE metadata block (RFC 9639 Section 8.8, Table 14).
+/// The picture type of a PICTURE metadata block (RFC 9639 Section 8.8,
+/// Table 13). The enum is non-exhaustive: values the RFC reserves are kept
+/// as read.
 pub const PictureType = enum(u32) {
     other,
     file_icon,
@@ -386,18 +432,24 @@ pub const PictureType = enum(u32) {
 /// The PICTURE metadata block (RFC 9639 Section 8.8): an image associated
 /// with the stream.
 pub const Picture = struct {
+    /// The picture type (Table 13).
     picture_type: PictureType,
     /// MIME type string, owned by this `Picture` and freed by `deinit`.
     mime_type: []u8,
     /// UTF-8 description, owned by this `Picture` and freed by `deinit`.
     description: []u8,
+    /// Width of the picture in pixels, or 0 if unknown or not applicable.
     width: u32,
+    /// Height of the picture in pixels, or 0 if unknown or not applicable.
     height: u32,
+    /// Color depth of the picture in bits per pixel, or 0 if unknown.
     depth: u32,
+    /// For indexed-color pictures, the number of colors used; 0 otherwise.
     colors: u32,
     /// Picture file data, owned by this `Picture` and freed by `deinit`.
     data: []u8,
 
+    /// Errors returned by `read`.
     pub const ReadError = std.Io.Reader.ReadAllocError;
 
     /// Reads a PICTURE block body from `reader`.
@@ -434,6 +486,8 @@ pub const Picture = struct {
         };
     }
 
+    /// Frees `mime_type`, `description`, and `data`. `allocator` must be the one
+    /// passed to `read`.
     pub fn deinit(self: Picture, allocator: std.mem.Allocator) void {
         allocator.free(self.mime_type);
         allocator.free(self.description);

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// The CRC-8 algorithm used to protect a frame header (RFC 9639 Section 9.1.7):
+/// The CRC-8 algorithm used to protect a frame header (RFC 9639 Section 9.1.8):
 /// polynomial 0x07, no reflection, initial value 0, no output XOR.
 pub const HeaderCrc = std.hash.crc.Crc8Smbus;
 
@@ -21,15 +21,17 @@ fn verifyCrc(expected: anytype, actual: @TypeOf(expected)) error{CrcMismatch}!vo
 }
 
 /// How a frame's block size relates to the value coded after the sync code
-/// (RFC 9639 Section 9.1.2): whether the coded number is a frame number
+/// (RFC 9639 Section 9.1): whether the coded number is a frame number
 /// (every frame has the same block size, except possibly the last) or a
 /// sample number (frames may have varying block sizes).
 pub const BlockingStrategy = enum(u1) {
+    /// Fixed block size: the coded number is a frame number (Section 9.1.5).
     fixed = 0,
+    /// Variable block size: the coded number is the number of the first sample.
     variable = 1,
 };
 
-/// The channel assignment of a frame (RFC 9639 Section 9.1.4).
+/// The channel assignment of a frame (RFC 9639 Section 9.1.3).
 pub const ChannelAssignment = union(enum) {
     /// Each channel is coded independently. The value is the channel count (1-8).
     independent: u4,
@@ -91,12 +93,15 @@ pub const RecordingByteSource = struct {
     allocator: std.mem.Allocator,
     recorded: std.ArrayList(u8) = .empty,
 
+    /// Frees the recorded bytes.
     pub fn deinit(self: *RecordingByteSource) void {
         self.recorded.deinit(self.allocator);
     }
 
+    /// Errors returned by `takeByte`.
     pub const TakeByteError = std.Io.Reader.Error || std.mem.Allocator.Error;
 
+    /// Reads one byte from the underlying reader and records it.
     pub fn takeByte(self: *RecordingByteSource) TakeByteError!u8 {
         const byte = try self.reader.takeByte();
         try self.recorded.append(self.allocator, byte);
@@ -110,8 +115,11 @@ pub const BitReader = struct {
     current_byte: u8 = 0,
     bits_remaining: u4 = 0,
 
+    /// Errors returned by the reading methods.
     pub const Error = RecordingByteSource.TakeByteError;
 
+    /// Reads one bit, fetching a new byte from `source` when the current one
+    /// is used up.
     pub fn readBit(self: *BitReader) Error!u1 {
         if (self.bits_remaining == 0) {
             self.current_byte = try self.source.takeByte();
@@ -202,8 +210,10 @@ pub const BitWriter = struct {
     current_byte: u8 = 0,
     bits_filled: u4 = 0,
 
+    /// Errors returned by the writing methods: only allocation can fail.
     pub const Error = std.mem.Allocator.Error;
 
+    /// Writes one bit.
     pub fn writeBit(self: *BitWriter, bit: u1) Error!void {
         try self.writeBits(bit, 1);
     }
@@ -259,7 +269,9 @@ pub const BitWriter = struct {
 /// The type of a subframe (RFC 9639 Section 9.2.1) and, where applicable, its
 /// predictor order.
 pub const SubframeType = union(enum) {
+    /// CONSTANT: a single value repeated for the whole block (Section 9.2.3).
     constant,
+    /// VERBATIM: every sample stored unencoded (Section 9.2.4).
     verbatim,
     /// Fixed predictor order (0-4).
     fixed: u3,
@@ -297,14 +309,18 @@ pub const SubframeType = union(enum) {
 pub const SubframeHeader = struct {
     subframe_type: SubframeType,
     /// Number of least-significant bits absent from every sample in this
-    /// subframe (0 if none), per RFC 9639 Section 9.2.5.
+    /// subframe (0 if none), per RFC 9639 Section 9.2.2.
     wasted_bits: u6,
 
+    /// Errors returned by `read`.
     pub const ReadError = BitReader.Error || error{
         ReservedBit,
         ReservedSubframeType,
     };
 
+    /// Reads a subframe header (RFC 9639 Section 9.2.1) from `bits`: the
+    /// leading zero bit, the type code, and the wasted-bits flag followed, if
+    /// set, by `wasted_bits - 1` in unary (Section 9.2.2).
     pub fn read(bits: *BitReader) ReadError!SubframeHeader {
         if (try bits.readBit() != 0) return error.ReservedBit;
         const subframe_type = try SubframeType.decode(@intCast(try bits.readBits(6)));
@@ -313,6 +329,7 @@ pub const SubframeHeader = struct {
         return .{ .subframe_type = subframe_type, .wasted_bits = wasted_bits };
     }
 
+    /// Errors returned by `write`.
     pub const WriteError = BitWriter.Error || error{
         /// A FIXED predictor order above 4, or an LPC order outside 1-32
         /// (RFC 9639 Section 9.2.1).
@@ -345,10 +362,12 @@ pub const Residual = struct {
     /// decoded residual may use a different parameter per partition.
     rice_parameter: ?u5 = null,
 
+    /// Errors returned by `read`.
     pub const ReadError = BitReader.Error || std.mem.Allocator.Error || error{
         ReservedResidualCodingMethod,
     };
 
+    /// Errors returned by `write`.
     pub const WriteError = BitWriter.Error || error{
         /// `rice_parameter` is `null` or above 30. The escape codes 0b1111
         /// (4-bit method) and 0b11111 (5-bit method) leave 14 and 30 as the
@@ -435,6 +454,7 @@ pub const Residual = struct {
         return .{ .values = values };
     }
 
+    /// Frees `values`. `allocator` must be the one passed to `read`.
     pub fn deinit(self: Residual, allocator: std.mem.Allocator) void {
         allocator.free(self.values);
     }
@@ -478,23 +498,31 @@ fn readRiceValue(bits: *BitReader, k: u7) BitReader.Error!i32 {
 /// audio samples. Reconstructing samples is the responsibility of the
 /// higher-level `ziggyflac` module.
 pub const SubframeBody = union(enum) {
+    /// The one value of a CONSTANT subframe (RFC 9639 Section 9.2.3).
     constant: i64,
     /// Raw samples, owned by this body and freed by `deinit`.
     verbatim: []i64,
+    /// A FIXED subframe (RFC 9639 Section 9.2.5): warmup samples and a residual.
     fixed: struct {
         /// Warmup samples, owned by this body and freed by `deinit`.
         warmup: []i64,
+        /// The coded residual (RFC 9639 Section 9.2.7).
         residual: Residual,
     },
+    /// An LPC subframe (RFC 9639 Section 9.2.6): warmup samples, quantized
+    /// coefficients, and a residual.
     lpc: struct {
         /// Warmup samples, owned by this body and freed by `deinit`.
         warmup: []i64,
+        /// Right shift applied to the prediction (RFC 9639 Section 9.2.6).
         qlp_shift: i6,
         /// QLP coefficients, owned by this body and freed by `deinit`.
         coefficients: []i64,
+        /// The coded residual (RFC 9639 Section 9.2.7).
         residual: Residual,
     },
 
+    /// Errors returned by `read`.
     pub const ReadError = BitReader.Error || std.mem.Allocator.Error || Residual.ReadError;
 
     /// Reads a subframe body of the given `subframe_type` for a channel with
@@ -545,6 +573,7 @@ pub const SubframeBody = union(enum) {
         };
     }
 
+    /// Errors returned by `write`.
     pub const WriteError = BitWriter.Error || Residual.WriteError || error{
         /// The body kind has no writer yet: only VERBATIM and FIXED bodies
         /// can be written.
@@ -585,6 +614,7 @@ pub const SubframeBody = union(enum) {
         return warmup;
     }
 
+    /// Frees whatever this body owns. `allocator` must be the one passed to `read`.
     pub fn deinit(self: SubframeBody, allocator: std.mem.Allocator) void {
         switch (self) {
             .constant => {},
@@ -604,11 +634,20 @@ pub const SubframeBody = union(enum) {
 
 /// A full subframe: header plus body (RFC 9639 Section 9.2).
 pub const Subframe = struct {
+    /// The subframe header (RFC 9639 Section 9.2.1).
     header: SubframeHeader,
+    /// The subframe body, which holds the samples or the predictor data.
     body: SubframeBody,
 
+    /// Errors returned by `read`.
     pub const ReadError = SubframeHeader.ReadError || SubframeBody.ReadError;
 
+    /// Reads a subframe (RFC 9639 Section 9.2) from `bits`: the header, then
+    /// the body. `sample_width` is the bit depth of this channel in the frame,
+    /// including the extra bit of a side channel (RFC 9639 Section 9.2.3) and
+    /// before the subframe's wasted bits are removed. `block_size` is the
+    /// number of samples in the frame. The returned subframe owns its body and
+    /// must be freed with `deinit`.
     pub fn read(bits: *BitReader, allocator: std.mem.Allocator, sample_width: u7, block_size: u16) ReadError!Subframe {
         const header = try SubframeHeader.read(bits);
         const effective_width = sample_width - header.wasted_bits;
@@ -616,6 +655,7 @@ pub const Subframe = struct {
         return .{ .header = header, .body = body };
     }
 
+    /// Errors returned by `write`.
     pub const WriteError = SubframeHeader.WriteError || SubframeBody.WriteError || error{
         /// `header.subframe_type` does not describe `body`, or a FIXED
         /// body's warmup length differs from the predictor order.
@@ -648,6 +688,7 @@ pub const Subframe = struct {
         try self.body.write(bits, sample_width - self.header.wasted_bits, block_size);
     }
 
+    /// Frees the body. `allocator` must be the one passed to `read`.
     pub fn deinit(self: Subframe, allocator: std.mem.Allocator) void {
         self.body.deinit(allocator);
     }
@@ -1000,16 +1041,19 @@ fn readCodedNumber(source: *RecordingByteSource) FrameHeader.ReadError!u36 {
 /// A full FLAC frame (RFC 9639 Section 9): header, one subframe per channel,
 /// byte-alignment padding, and a CRC-16 footer.
 pub const Frame = struct {
+    /// The frame header (RFC 9639 Section 9.1).
     header: FrameHeader,
     /// One subframe per physical channel, owned by this `Frame` and freed by `deinit`.
     subframes: []Subframe,
 
+    /// Errors returned by `read`.
     pub const ReadError = FrameHeader.ReadError || Subframe.ReadError || std.mem.Allocator.Error;
 
-    /// Reads a whole frame from `reader`, given the stream's default sample
-    /// rate and bits-per-sample (from STREAMINFO, used when the frame header
-    /// does not encode its own). Verifies both the header's CRC-8 and the
-    /// frame's CRC-16 footer.
+    /// Reads a whole frame from `reader`, given the stream's bits per sample
+    /// (from STREAMINFO), which is used when the frame header does not encode
+    /// its own. Verifies both the header's CRC-8 and the frame's CRC-16
+    /// footer. The returned frame owns its subframes and must be freed with
+    /// `deinit`.
     pub fn read(
         reader: *std.Io.Reader,
         allocator: std.mem.Allocator,
@@ -1057,6 +1101,7 @@ pub const Frame = struct {
         return .{ .header = header, .subframes = subframes };
     }
 
+    /// Errors returned by `write`.
     pub const WriteError = FrameHeader.WriteError || Subframe.WriteError || error{
         /// The number of subframes differs from the header's channel assignment.
         ChannelCountMismatch,
@@ -1093,6 +1138,8 @@ pub const Frame = struct {
         try bits.writeBits(FooterCrc.hash(out.items[start..]), 16);
     }
 
+    /// Frees `subframes` and what each subframe owns. `allocator` must be the
+    /// one that allocated them (the one passed to `read`).
     pub fn deinit(self: Frame, allocator: std.mem.Allocator) void {
         for (self.subframes) |subframe| subframe.deinit(allocator);
         allocator.free(self.subframes);

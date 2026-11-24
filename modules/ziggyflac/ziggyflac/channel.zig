@@ -13,7 +13,7 @@ pub const DecodeError = std.mem.Allocator.Error || error{
     Overflow,
 };
 
-/// Undoes the frame's channel decorrelation (RFC 9639 Section 9.2), turning
+/// Undoes the frame's channel decorrelation (RFC 9639 Section 4.2), turning
 /// `subframes` - each subframe's already-reconstructed samples (see
 /// `subframe.decode`), in the order `flacontainer` read them - into the true
 /// per-channel sample arrays, in left-to-right channel order.

@@ -21,6 +21,7 @@ pub const DecodedStream = struct {
     /// `DecodedStream` and freed by `deinit`.
     samples: [][]i64,
 
+    /// Frees `samples`. `allocator` must be the one passed to `decode`.
     pub fn deinit(self: DecodedStream, allocator: std.mem.Allocator) void {
         for (self.samples) |channel_samples| allocator.free(channel_samples);
         allocator.free(self.samples);
@@ -35,8 +36,14 @@ pub const DecodeError = subframe.DecodeError || channel.DecodeError || error{
 };
 
 /// Decodes every frame of `stream` - subframe prediction, wasted bits, and
-/// channel decorrelation (RFC 9639 Section 9.2) - and assembles the result
-/// into a single `DecodedStream` spanning the whole stream.
+/// channel decorrelation (RFC 9639 Sections 9.2 and 4.2) - and assembles the
+/// result into a single `DecodedStream` spanning the whole stream. The
+/// whole decoded stream is held in memory.
+///
+/// The sample rate, channel count, and bit depth of the result are STREAMINFO's;
+/// the frame headers' own sample rate and bit depth are not compared with
+/// them. The STREAMINFO MD5 signature is not verified against the decoded
+/// samples. The returned value must be freed with `DecodedStream.deinit`.
 pub fn decode(allocator: std.mem.Allocator, stream: flacontainer.Stream) DecodeError!DecodedStream {
     const channel_count = stream.stream_info.channels;
 
