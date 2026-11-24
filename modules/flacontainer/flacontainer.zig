@@ -1,19 +1,35 @@
+//! `flacontainer` is the low-level layer of ziggyflac: it parses and writes
+//! the raw structure of a FLAC stream (RFC 9639) - the `fLaC` marker, the
+//! metadata blocks, and the audio frames with their subframes - without
+//! interpreting the audio. Turning subframes into PCM samples, and PCM
+//! samples into subframes, is the job of the `ziggyflac` module.
+//!
+//! Reading starts with `Stream.read`. Writing is done piece by piece:
+//! `writeMarker`, `metadata.Header.write`, `metadata.StreamInfo.write`, and
+//! `audio.Frame.write`.
 const std = @import("std");
 
+/// Constants of the FLAC format.
 pub const constants = struct {
+    /// The 4-byte marker that starts every FLAC stream: the ASCII text
+    /// `fLaC` (RFC 9639 Section 6).
     pub const marker: []const u8 = "fLaC";
 };
 
+/// Metadata blocks (RFC 9639 Section 8): STREAMINFO, PADDING, APPLICATION,
+/// SEEKTABLE, VORBIS_COMMENT, CUESHEET, and PICTURE.
 pub const metadata = @import("./flacontainer/metadata.zig");
+/// Audio frames (RFC 9639 Section 9): frame headers, subframes, residuals,
+/// and the CRCs, plus the `BitReader` and `BitWriter` they are built on.
 pub const audio = @import("./flacontainer/audio.zig");
 
 /// Errors returned by `readMarker`.
 pub const ReadMarkerError = std.Io.Reader.Error || error{
-    /// The stream did not start with the `fLaC` marker (RFC 9639 Section 8).
+    /// The stream did not start with the `fLaC` marker (RFC 9639 Section 6).
     InvalidMarker,
 };
 
-/// Reads and validates the leading `fLaC` marker (RFC 9639 Section 8) from
+/// Reads and validates the leading `fLaC` marker (RFC 9639 Section 6) from
 /// `reader`, first skipping a leading ID3v2 tag if present. RFC 9639
 /// requires the marker to be the very first bytes of the stream, but some
 /// real-world files are prefixed with an ID3v2 tag (not spec-compliant, but
@@ -67,9 +83,12 @@ fn skipLeadingId3v2Tag(reader: *std.Io.Reader) std.Io.Reader.Error!void {
 }
 
 /// A fully parsed FLAC stream: the mandatory STREAMINFO metadata block,
-/// every other metadata block (RFC 9639 Sections 8.4-8.8), and every audio
-/// frame.
+/// every APPLICATION, SEEKTABLE, VORBIS_COMMENT, CUESHEET, and PICTURE block
+/// (RFC 9639 Sections 8.4-8.8), and every audio frame. PADDING blocks
+/// (Section 8.3) are skipped and not kept.
 pub const Stream = struct {
+    /// The STREAMINFO block (RFC 9639 Section 8.2). If the stream has more
+    /// than one, the last one read is kept.
     stream_info: metadata.StreamInfo,
     /// Every APPLICATION block, in stream order (RFC 9639 permits zero or
     /// more). Owned by this `Stream` and freed by `deinit`. Defaults to
@@ -104,7 +123,10 @@ pub const Stream = struct {
         metadata.Picture.ReadError ||
         audio.Frame.ReadError ||
         error{
-            /// The first metadata block was not STREAMINFO (RFC 9639 Section 7 requires it).
+            /// The metadata blocks ended without a STREAMINFO block, which
+            /// every stream must have (RFC 9639 Section 8.2). The check is
+            /// made once the last metadata block has been read: a STREAMINFO
+            /// block that does not come first is not rejected.
             MissingStreamInfo,
             /// A second SEEKTABLE block appeared (RFC 9639 permits at most one).
             DuplicateSeekTable,
@@ -114,9 +136,18 @@ pub const Stream = struct {
             DuplicateCueSheet,
         };
 
-    /// Reads the marker, every metadata block, and every audio frame from
-    /// `reader`. `allocator` backs every returned value, all owned by the
-    /// returned `Stream` and freed together by `deinit`.
+    /// Reads the marker (see `readMarker`), every metadata block, and every
+    /// audio frame from `reader`, up to the end of the stream. The whole
+    /// stream is held in memory: every frame is parsed and kept until
+    /// `deinit`.
+    ///
+    /// Frames are read until `reader` ends exactly at a frame boundary; a
+    /// stream that ends inside a frame is an error. Both the CRC-8 of every
+    /// frame header and the CRC-16 of every frame are verified. The STREAMINFO
+    /// MD5 signature is stored but not checked against the audio.
+    ///
+    /// `allocator` backs every returned value, all owned by the returned
+    /// `Stream` and freed together by `deinit`.
     pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!Stream {
         try readMarker(reader);
 
@@ -195,6 +226,8 @@ pub const Stream = struct {
         };
     }
 
+    /// Frees everything this `Stream` owns. `allocator` must be the one
+    /// passed to `read`.
     pub fn deinit(self: Stream, allocator: std.mem.Allocator) void {
         for (self.applications) |application| application.deinit(allocator);
         allocator.free(self.applications);
@@ -528,7 +561,7 @@ test "Stream.read parses a frame-header sample rate requiring the 8-bit kHz esca
     // 20 samples, 37000 Hz (a multiple of 1000 not in the direct sample-rate
     // table), mono, 16-bit, encoded by the reference flac 1.5.0 encoder (run
     // ad hoc via `nix run nixpkgs#flac --`, not added as a project
-    // dependency). RFC 9639 Section 9.1.3's sample-rate code has 11 direct
+    // dependency). RFC 9639 Section 9.1.2's sample-rate code has 11 direct
     // entries; 37000 matches none, so the encoder must use the 8-bit-kHz
     // escape (code 12) to represent it in the frame header at all.
     const bytes = @embedFile("testdata/rate37000.flac");
@@ -577,7 +610,7 @@ test "Stream.read parses a frame whose bits-per-sample is inherited from STREAMI
     // fixture inspected while working through #73/#85) codes bits-per-sample
     // explicitly in the frame header; no available encoder (SoX, reference
     // flac) was found to ever emit sample-size code 0 (RFC 9639 Section
-    // 9.1.3's "get bits-per-sample from STREAMINFO" case), so this is a
+    // 9.1.4's "get bits-per-sample from STREAMINFO" case), so this is a
     // hand-crafted stream instead of a real-encoder fixture.
     //
     // STREAMINFO body: 8000 Hz, 1 channel, 16 bits per sample, 192 total

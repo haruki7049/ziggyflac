@@ -21,6 +21,7 @@ pub const DecodedStream = struct {
     /// `DecodedStream` and freed by `deinit`.
     samples: [][]i64,
 
+    /// Frees `samples`. `allocator` must be the one passed to `decode`.
     pub fn deinit(self: DecodedStream, allocator: std.mem.Allocator) void {
         for (self.samples) |channel_samples| allocator.free(channel_samples);
         allocator.free(self.samples);
@@ -35,8 +36,14 @@ pub const DecodeError = subframe.DecodeError || channel.DecodeError || error{
 };
 
 /// Decodes every frame of `stream` - subframe prediction, wasted bits, and
-/// channel decorrelation (RFC 9639 Section 9.2) - and assembles the result
-/// into a single `DecodedStream` spanning the whole stream.
+/// channel decorrelation (RFC 9639 Sections 9.2 and 4.2) - and assembles the
+/// result into a single `DecodedStream` spanning the whole stream. The
+/// whole decoded stream is held in memory.
+///
+/// The sample rate, channel count, and bit depth of the result are STREAMINFO's;
+/// the frame headers' own sample rate and bit depth are not compared with
+/// them. The STREAMINFO MD5 signature is not verified against the decoded
+/// samples. The returned value must be freed with `DecodedStream.deinit`.
 pub fn decode(allocator: std.mem.Allocator, stream: flacontainer.Stream) DecodeError!DecodedStream {
     const channel_count = stream.stream_info.channels;
 
@@ -506,7 +513,7 @@ test "decode reconstructs a 32-bit FLAC file's PCM samples" {
     // generated samples.
     //
     // 12-bit and 20-bit (the other bits-per-sample values RFC 9639 Section
-    // 9.1.3's frame-header code can express directly) are not covered here:
+    // 9.1.4's frame-header code can express directly) are not covered here:
     // neither SoX nor the reference flac encoder's raw-PCM import accepts
     // any bit depth other than 8/16/24/32 (byte-aligned containers only), so
     // producing them would require hand-crafting a bitstream with a
@@ -536,7 +543,7 @@ test "decode reconstructs a FLAC file with a block size requiring the 16-bit esc
     // 1000 samples, 8 kHz, mono, 16-bit, encoded as a single 1000-sample
     // frame via the reference flac 1.5.0 encoder's `--blocksize=1000` (run ad
     // hoc via `nix run nixpkgs#flac --`, not added as a project dependency).
-    // RFC 9639 Section 9.1.2's block-size code has direct entries only for
+    // RFC 9639 Section 9.1.1's block-size code has direct entries only for
     // specific sizes (192; 576-4608 by doubling; 256-32768 by doubling) plus
     // an 8-bit escape (up to 256) and a 16-bit escape; 1000 matches none of
     // the direct codes and exceeds the 8-bit escape's range, so flacontainer
