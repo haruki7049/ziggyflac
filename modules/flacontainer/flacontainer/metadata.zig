@@ -59,7 +59,7 @@ pub const Header = struct {
     /// big-endian body length.
     pub fn write(self: Header, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const flag: u8 = if (self.is_last) 0x80 else 0;
-        try writer.writeByte(flag | @intFromEnum(self.block_type));
+        try writer.writeByte(flag | @backingInt(self.block_type));
         try writer.writeInt(u24, self.length, .big);
     }
 };
@@ -456,7 +456,7 @@ pub const Picture = struct {
     /// The returned value owns `mime_type`, `description`, and `data`, and
     /// must be freed with `deinit`.
     pub fn read(reader: *std.Io.Reader, allocator: std.mem.Allocator) ReadError!Picture {
-        const picture_type: PictureType = @enumFromInt(try reader.takeInt(u32, .big));
+        const picture_type: PictureType = @fromBackingInt(@intCast(try reader.takeInt(u32, .big)));
 
         const mime_length = try reader.takeInt(u32, .big);
         const mime_type = try reader.readAlloc(allocator, mime_length);
@@ -496,13 +496,13 @@ pub const Picture = struct {
 };
 
 test "each BlockHeader has u7 value" {
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.stream_info), 0);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.padding), 1);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.application), 2);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.seek_table), 3);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.vorbis_comment), 4);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.cue_sheet), 5);
-    try std.testing.expectEqual(@intFromEnum(BlockHeader.picture), 6);
+    try std.testing.expectEqual(@backingInt(BlockHeader.stream_info), 0);
+    try std.testing.expectEqual(@backingInt(BlockHeader.padding), 1);
+    try std.testing.expectEqual(@backingInt(BlockHeader.application), 2);
+    try std.testing.expectEqual(@backingInt(BlockHeader.seek_table), 3);
+    try std.testing.expectEqual(@backingInt(BlockHeader.vorbis_comment), 4);
+    try std.testing.expectEqual(@backingInt(BlockHeader.cue_sheet), 5);
+    try std.testing.expectEqual(@backingInt(BlockHeader.picture), 6);
 }
 
 test "Header.read parses a non-last STREAMINFO header" {
@@ -560,12 +560,12 @@ test "StreamInfo.read parses a valid STREAMINFO body" {
 }
 
 test "StreamInfo.read rejects a truncated stream" {
-    var reader: std.Io.Reader = .fixed(&([_]u8{0x00} ** 10));
+    var reader: std.Io.Reader = .fixed(&(@as([10]u8, @splat(0x00))));
     try std.testing.expectError(error.EndOfStream, StreamInfo.read(&reader));
 }
 
 test "Padding.skip discards the block body" {
-    var reader: std.Io.Reader = .fixed(&([_]u8{0xff} ** 5 ++ [_]u8{'X'}));
+    var reader: std.Io.Reader = .fixed(&(@as([5]u8, @splat(0xff)) ++ [_]u8{'X'}));
     try Padding.skip(&reader, 5);
     try std.testing.expectEqual(@as(u8, 'X'), try reader.takeByte());
 }
@@ -580,8 +580,8 @@ test "Application.read parses the id and owns the data" {
 }
 
 test "SeekTable.read parses seek points" {
-    var reader: std.Io.Reader = .fixed(&([_]u8{0x00} ** 7 ++ [_]u8{0x01} ++ // sample_number = 1
-        [_]u8{0x00} ** 7 ++ [_]u8{0x02} ++ // stream_offset = 2
+    var reader: std.Io.Reader = .fixed(&(@as([7]u8, @splat(0x00)) ++ [_]u8{0x01} ++ // sample_number = 1
+        @as([7]u8, @splat(0x00)) ++ [_]u8{0x02} ++ // stream_offset = 2
         [_]u8{ 0x10, 0x00 } // frame_samples = 4096
     ));
     const table = try SeekTable.read(&reader, std.testing.allocator, SeekTable.point_size);
@@ -610,21 +610,21 @@ test "VorbisComment.read parses the vendor string and comments" {
 }
 
 test "CueSheet.read parses a track with one index point" {
-    var reader: std.Io.Reader = .fixed(&([_]u8{0} ** 128 ++ // media catalog number
-        [_]u8{0} ** 7 ++ [_]u8{0} ++ // lead-in samples
+    var reader: std.Io.Reader = .fixed(&(@as([128]u8, @splat(0)) ++ // media catalog number
+        @as([7]u8, @splat(0)) ++ [_]u8{0} ++ // lead-in samples
         [_]u8{0x80} ++ // flags: is_cd
-        [_]u8{0} ** 258 ++ // reserved
+        @as([258]u8, @splat(0)) ++ // reserved
         [_]u8{1} ++ // track count
         // track
-        [_]u8{0} ** 7 ++ [_]u8{0} ++ // track offset
+        @as([7]u8, @splat(0)) ++ [_]u8{0} ++ // track offset
         [_]u8{1} ++ // track number
-        [_]u8{0} ** 12 ++ // ISRC
+        @as([12]u8, @splat(0)) ++ // ISRC
         [_]u8{0x00} ++ // flags: audio, no pre-emphasis
-        [_]u8{0} ** 13 ++ // reserved
+        @as([13]u8, @splat(0)) ++ // reserved
         [_]u8{1} ++ // index point count
-        [_]u8{0} ** 7 ++ [_]u8{0} ++ // index offset
+        @as([7]u8, @splat(0)) ++ [_]u8{0} ++ // index offset
         [_]u8{1} ++ // index number
-        [_]u8{0} ** 3 // reserved
+        @as([3]u8, @splat(0)) // reserved
     ));
     const cue_sheet = try CueSheet.read(&reader, std.testing.allocator);
     defer cue_sheet.deinit(std.testing.allocator);
@@ -681,7 +681,7 @@ test "StreamInfo.write emits the RFC 9639 Section 8.2 layout" {
         .channels = 2,
         .bits_per_sample = 16,
         .total_samples = 0x1_2345_6789,
-        .md5_signature = .{0xaa} ** 16,
+        .md5_signature = @splat(0xaa),
     };
     var buffer: [StreamInfo.body_length]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -694,7 +694,7 @@ test "StreamInfo.write emits the RFC 9639 Section 8.2 layout" {
         0x10, 0x00, 0x10, 0x00, // min and max block size
         0x00, 0x01, 0x02, 0x00, 0x03, 0x04, // min and max frame size
         0x0a, 0xc4, 0x42, 0xf1, 0x23, 0x45, 0x67, 0x89, // packed fields
-    } ++ [_]u8{0xaa} ** 16;
+    } ++ @as([16]u8, @splat(0xaa));
     try std.testing.expectEqualSlices(u8, &expected, &buffer);
 
     var reader: std.Io.Reader = .fixed(&buffer);
@@ -713,7 +713,7 @@ test "StreamInfo.write rejects unsupported channel counts and bit depths" {
         .channels = 1,
         .bits_per_sample = 8,
         .total_samples = 0,
-        .md5_signature = .{0} ** 16,
+        .md5_signature = @splat(0),
     };
 
     var info = base;

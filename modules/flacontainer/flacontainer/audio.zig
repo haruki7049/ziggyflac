@@ -2,11 +2,11 @@ const std = @import("std");
 
 /// The CRC-8 algorithm used to protect a frame header (RFC 9639 Section 9.1.8):
 /// polynomial 0x07, no reflection, initial value 0, no output XOR.
-pub const HeaderCrc = std.hash.crc.Crc8Smbus;
+pub const HeaderCrc = std.hash.crc.@"CRC-8/SMBUS";
 
 /// The CRC-16 algorithm used to protect a whole frame (RFC 9639 Section 9.3):
 /// polynomial 0x8005, no reflection, initial value 0, no output XOR.
-pub const FooterCrc = std.hash.crc.Crc16Umts;
+pub const FooterCrc = std.hash.crc.@"CRC-16/UMTS";
 
 /// Compares an already-computed CRC (from `HeaderCrc.hash` or
 /// `FooterCrc.hash`) against the value read from the stream, returning
@@ -768,7 +768,7 @@ pub const FrameHeader = struct {
         const flags_byte = try source.takeByte();
         if (flags_byte & sync_bits_mask != sync_bits_value) return error.InvalidSyncCode;
         if (flags_byte & reserved_flag_mask != 0) return error.ReservedBit;
-        const blocking_strategy: BlockingStrategy = @enumFromInt(@as(u1, @intCast(flags_byte & 0b1)));
+        const blocking_strategy: BlockingStrategy = @fromBackingInt(@intCast(@as(u1, @intCast(flags_byte & 0b1))));
 
         const size_rate_byte = try source.takeByte();
         const block_size_code: u4 = @intCast(size_rate_byte >> 4);
@@ -946,7 +946,7 @@ pub const FrameHeader = struct {
 
         // Frame sync code (15 bits), then the blocking strategy bit.
         try bits.writeBits(0b111111111111100, 15);
-        try bits.writeBit(@intFromEnum(self.blocking_strategy));
+        try bits.writeBit(@backingInt(self.blocking_strategy));
         try bits.writeBits(block_size_code, 4);
         try bits.writeBits(sample_rate_code, 4);
         try bits.writeBits(try self.channel_assignment.encode(), 4);
