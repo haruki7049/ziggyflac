@@ -7,10 +7,10 @@ workflows:
         - 'actions/checkout@v7.0.1'
         - 'mlugg/setup-zig@v2.2.1'
     '.github/workflows/claude-code-review.yml':
-        - 'actions/checkout@v4.4.0'
+        - 'actions/checkout@v7.0.1'
         - 'anthropics/claude-code-action@v1.0.289'
     '.github/workflows/claude.yml':
-        - 'actions/checkout@v4.4.0'
+        - 'actions/checkout@v7.0.1'
         - 'anthropics/claude-code-action@v1.0.289'
     '.github/workflows/dependabot-auto-merge.yml': []
     '.github/workflows/nix-ci.yml':
@@ -24,11 +24,6 @@ workflows:
         - 'actions/checkout@v7.0.1'
         - 'mlugg/setup-zig@v2.2.1'
 dependencies:
-    'actions/checkout@v4.4.0':
-        ref: 'v4.4.0'
-        commit: 'sha1-11d5960a326750d5838078e36cf38b85af677262'
-        owner_id: 44036562
-        repo_id: 197814629
     'actions/checkout@v7.0.1':
         ref: 'v7.0.1'
         commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'
