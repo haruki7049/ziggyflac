@@ -47,6 +47,9 @@
             pkgs.nil
             ZLS
 
+            # Reference FLAC decoder, used by the interoperability tests
+            pkgs.flac
+
             # Music Player
             pkgs.sox # Use this command as: `play result.wav`
           ];
@@ -55,6 +58,9 @@
             name = "ziggyflac";
             src = lib.cleanSource ./.;
             doCheck = true;
+
+            # The interoperability tests must run, not be skipped, in this check
+            zigCheckFlags = [ "-Dflac-interop=required" ];
 
             inherit nativeBuildInputs buildInputs;
 
