@@ -21,6 +21,8 @@ jobs:
         uses: cachix/install-nix-action@v32.0.0
         with:
           nix_path: nixpkgs=channel:nixos-unstable
+      - name: Print the flac version used by the interoperability tests
+        run: nix develop --command flac --version
       - name: Run nix flake check
         run: nix flake check --all-systems
 

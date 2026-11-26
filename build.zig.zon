@@ -10,6 +10,7 @@
         "build.zig",
         "build.zig.zon",
         "modules",
+        "tests",
         "LICENSE-APACHE",
         "LICENSE-MIT",
         "README.md",
