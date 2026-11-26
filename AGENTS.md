@@ -21,6 +21,7 @@ ______________________________________________________________________
   - `modules/flacontainer/flacontainer/metadata.zig`: Metadata block definitions (`BlockHeader`, etc.).
   - `modules/flacontainer/flacontainer/audio.zig`: Audio frame definitions.
   - `modules/ziggyflac/ziggyflac.zig`: Entry point of the high-level `ziggyflac` module.
+  - `tests/interop/interop.zig`: Entry point of the interoperability tests, a separate root module that decodes the encoder's output with the reference `flac` decoder. `flac` is a test-time tool only. The build option `-Dflac-interop=required` fails these tests when `flac` is missing; by default they are skipped.
   - `build.zig` & `build.zig.zon`: Build definition and package metadata. Steps: `zig build` (static libraries `ziggyflac` and `flacontainer`), `zig build test`.
   - `flake.nix`, `shell.nix`, `default.nix`: Nix development shell and package configurations.
   - `.github/workflows/`: CI workflows (`ci.yml`, `nix-checker.yml`, `pr-conventional-commits-validation.yml`).
