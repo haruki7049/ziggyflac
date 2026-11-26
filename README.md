@@ -156,6 +156,19 @@ zig build test   # runs the tests of both modules
 treefmt          # formats Zig, Nix, Markdown, GitHub Actions, and shell files
 ```
 
+### Interoperability tests
+
+`tests/interop/` holds tests that encode PCM with `ziggyflac.encoder.encode`, decode the stream with the reference `flac` decoder, and compare its output with the original samples. They run as part of `zig build test`, over a layered parameter matrix (every bit depth, channel count, block size, and sample rate code, several contents and lengths, and a fixed-seed pseudo-random sample of further combinations).
+
+`flac` is a test-time tool only; the library has no C dependency. The build option `-Dflac-interop` chooses what happens when `flac` is not on `PATH`:
+
+- `auto` (the default): the interoperability tests are skipped.
+- `required`: the interoperability tests fail. The Nix development shell provides `flac`, and `nix flake check` runs the tests in this mode.
+
+```sh
+zig build test -Dflac-interop=required
+```
+
 ## License
 
 Licensed under either of
